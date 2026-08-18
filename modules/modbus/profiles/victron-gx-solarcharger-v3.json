@@ -1,0 +1,25 @@
+{
+  "id": "victron.gx-solarcharger.v3",
+  "manufacturer": "Victron Energy",
+  "model": "Solar Charger / MPPT über GX",
+  "default_unit_id": 226,
+  "minimum_poll_seconds": 2,
+  "node_profile": 38,
+  "icon": "sun.max.fill",
+  "configuration_hint": "Auf dem GX-Gerät unter Einstellungen → Integrationen → Modbus-TCP den Server aktivieren. Als IP-Adresse die Adresse des GX-Geräts verwenden. Die Unit-ID des Solar Chargers unter Einstellungen → Integrationen → Modbus-TCP → Verfügbare Dienste ablesen; für dieses Gerät ist Unit-ID 226 voreingestellt. Nicht die System-Unit-ID 100 verwenden.",
+  "registers": [
+    {"id":"battery-voltage","address":771,"register_type":"holding","data_type":"uint16","scale":0.01,"attribute_type":195,"name":"Batteriespannung","unit":"V"},
+    {"id":"battery-current","address":772,"register_type":"holding","data_type":"int16","scale":0.1,"attribute_type":193,"name":"Batterieladestrom","unit":"A"},
+    {"id":"charge-state","address":775,"register_type":"holding","data_type":"uint16","attribute_type":213,"name":"Ladezustand","unit":"","value_labels":{"0":"Aus","2":"Fehler","3":"Bulk","4":"Absorption","5":"Float","6":"Lagerung","7":"Ausgleichsladung","11":"Sonstiger Zustand","252":"Externe Steuerung"}},
+    {"id":"pv-voltage","address":776,"register_type":"holding","data_type":"uint16","scale":0.01,"attribute_type":195,"name":"PV-Spannung","unit":"V"},
+    {"id":"pv-current","address":777,"register_type":"holding","data_type":"int16","scale":0.1,"attribute_type":193,"name":"PV-Strom","unit":"A"},
+    {"id":"yield-today","address":784,"register_type":"holding","data_type":"uint16","scale":0.1,"attribute_type":239,"name":"PV-Ertrag heute","unit":"kWh"},
+    {"id":"maximum-power-today","address":785,"register_type":"holding","data_type":"uint16","attribute_type":266,"name":"Maximale PV-Leistung heute","unit":"W"},
+    {"id":"yield-yesterday","address":786,"register_type":"holding","data_type":"uint16","scale":0.1,"attribute_type":4,"name":"PV-Ertrag gestern","unit":"kWh"},
+    {"id":"maximum-power-yesterday","address":787,"register_type":"holding","data_type":"uint16","attribute_type":266,"name":"Maximale PV-Leistung gestern","unit":"W"},
+    {"id":"error-code","address":788,"register_type":"holding","data_type":"uint16","attribute_type":213,"name":"Fehlercode","unit":"","value_labels":{"0":"Kein Fehler","1":"Batterietemperatur zu hoch","2":"Batteriespannung zu hoch","3":"Temperatursensor Plus vertauscht","4":"Temperatursensor Minus vertauscht","5":"Temperatursensor getrennt","6":"Spannungsmessung Plus vertauscht","7":"Spannungsmessung Minus vertauscht","8":"Spannungsmessung getrennt","9":"Spannungsverlust der Batterieleitung zu hoch","17":"Laderegler zu heiß","18":"Überstrom am Laderegler","19":"Stromrichtung umgekehrt","20":"Bulk-Zeitlimit erreicht","22":"Temperatursensor des Ladereglers vertauscht","23":"Temperatursensor des Ladereglers getrennt","34":"PV-Eingangsstrom zu hoch"}},
+    {"id":"user-yield","address":790,"register_type":"holding","data_type":"uint16","scale":0.1,"attribute_type":4,"name":"PV-Ertrag seit Rückstellung","unit":"kWh"},
+    {"id":"mpp-mode","address":791,"register_type":"holding","data_type":"uint16","attribute_type":213,"name":"MPP-Betriebsart","unit":"","value_labels":{"0":"Aus","1":"Spannungs-/Strombegrenzung","2":"MPPT aktiv","255":"Nicht verfügbar"}},
+    {"id":"pv-power","address":792,"register_type":"holding","data_type":"uint32","attribute_type":266,"name":"PV-Leistung","unit":"W"}
+  ]
+}

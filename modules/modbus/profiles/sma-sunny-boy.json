@@ -1,0 +1,23 @@
+{
+  "id": "sma.sunny-boy.core",
+  "manufacturer": "SMA",
+  "model": "Sunny Boy · allgemein",
+  "default_unit_id": 3,
+  "minimum_poll_seconds": 10,
+  "node_profile": 38,
+  "icon": "sun.max.fill",
+  "configuration_hint": "Im Webinterface als Installateur unter Geräteparameter → Externe Kommunikation → Modbus den TCP-Server aktivieren. Standard: Port 502, Unit-ID 3.",
+  "registers": [
+    {"id":"device-status","address":30201,"register_type":"holding","data_type":"uint32","attribute_type":213,"name":"Gerätestatus","unit":"","unavailable_value_policy":"sma"},
+    {"id":"total-yield","address":30529,"register_type":"holding","data_type":"uint32","scale":0.001,"attribute_type":4,"name":"Gesamtertrag","unit":"kWh","unavailable_value_policy":"sma"},
+    {"id":"operating-time","address":30541,"register_type":"holding","data_type":"uint32","scale":0.0002777777777777778,"attribute_type":214,"name":"Betriebszeit","unit":"h","unavailable_value_policy":"sma"},
+    {"id":"feed-in-time","address":30543,"register_type":"holding","data_type":"uint32","scale":0.0002777777777777778,"attribute_type":214,"name":"Einspeisezeit","unit":"h","unavailable_value_policy":"sma"},
+    {"id":"dc-current","address":30769,"register_type":"holding","data_type":"int32","scale":0.001,"attribute_type":193,"name":"DC-Strom","unit":"A","unavailable_value_policy":"sma"},
+    {"id":"dc-voltage","address":30771,"register_type":"holding","data_type":"int32","scale":0.01,"attribute_type":195,"name":"DC-Spannung","unit":"V","unavailable_value_policy":"sma"},
+    {"id":"dc-power","address":30773,"register_type":"holding","data_type":"int32","attribute_type":266,"name":"DC-Leistung","unit":"W","unavailable_value_policy":"sma"},
+    {"id":"ac-active-power","address":30775,"register_type":"holding","data_type":"int32","attribute_type":266,"name":"AC-Wirkleistung","unit":"W","unavailable_value_policy":"sma"},
+    {"id":"ac-voltage-l1","address":30783,"register_type":"holding","data_type":"uint32","scale":0.01,"attribute_type":195,"name":"Netzspannung L1","unit":"V","unavailable_value_policy":"sma"},
+    {"id":"ac-current","address":30795,"register_type":"holding","data_type":"uint32","scale":0.001,"attribute_type":193,"name":"Netzstrom","unit":"A","unavailable_value_policy":"sma"},
+    {"id":"grid-frequency","address":30803,"register_type":"holding","data_type":"uint32","scale":0.01,"attribute_type":194,"name":"Netzfrequenz","unit":"Hz","unavailable_value_policy":"sma"}
+  ]
+}

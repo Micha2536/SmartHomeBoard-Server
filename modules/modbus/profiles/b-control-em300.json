@@ -1,0 +1,29 @@
+{
+  "id": "tq.b-control.em300",
+  "manufacturer": "b-control / TQ",
+  "model": "Energy Manager EM300",
+  "default_unit_id": 247,
+  "minimum_poll_seconds": 2,
+  "node_profile": 32,
+  "icon": "gauge.with.dots.needle.50percent",
+  "configuration_hint": "Im Webinterface des EM300 den Modbus-TCP-Slave aktivieren. Standardport 502; werkseitige Unit-ID 247.",
+  "registers": [
+    {"id":"grid-import-power","address":0,"register_type":"holding","data_type":"uint32","scale":0.1,"attribute_type":265,"name":"Netzbezug","unit":"W"},
+    {"id":"grid-export-power","address":2,"register_type":"holding","data_type":"uint32","scale":0.1,"attribute_type":264,"name":"Netzeinspeisung","unit":"W"},
+    {"id":"grid-frequency","address":26,"register_type":"holding","data_type":"uint32","scale":0.001,"attribute_type":194,"name":"Netzfrequenz","unit":"Hz"},
+    {"id":"grid-import-l1","address":40,"register_type":"holding","data_type":"uint32","scale":0.1,"attribute_type":265,"name":"Netzbezug L1","unit":"W"},
+    {"id":"grid-export-l1","address":42,"register_type":"holding","data_type":"uint32","scale":0.1,"attribute_type":264,"name":"Netzeinspeisung L1","unit":"W"},
+    {"id":"current-l1","address":60,"register_type":"holding","data_type":"uint32","scale":0.001,"attribute_type":193,"name":"Strom L1","unit":"A"},
+    {"id":"voltage-l1","address":62,"register_type":"holding","data_type":"uint32","scale":0.001,"attribute_type":195,"name":"Spannung L1","unit":"V"},
+    {"id":"grid-import-l2","address":80,"register_type":"holding","data_type":"uint32","scale":0.1,"attribute_type":265,"name":"Netzbezug L2","unit":"W"},
+    {"id":"grid-export-l2","address":82,"register_type":"holding","data_type":"uint32","scale":0.1,"attribute_type":264,"name":"Netzeinspeisung L2","unit":"W"},
+    {"id":"current-l2","address":100,"register_type":"holding","data_type":"uint32","scale":0.001,"attribute_type":193,"name":"Strom L2","unit":"A"},
+    {"id":"voltage-l2","address":102,"register_type":"holding","data_type":"uint32","scale":0.001,"attribute_type":195,"name":"Spannung L2","unit":"V"},
+    {"id":"grid-import-l3","address":120,"register_type":"holding","data_type":"uint32","scale":0.1,"attribute_type":265,"name":"Netzbezug L3","unit":"W"},
+    {"id":"grid-export-l3","address":122,"register_type":"holding","data_type":"uint32","scale":0.1,"attribute_type":264,"name":"Netzeinspeisung L3","unit":"W"},
+    {"id":"current-l3","address":140,"register_type":"holding","data_type":"uint32","scale":0.001,"attribute_type":193,"name":"Strom L3","unit":"A"},
+    {"id":"voltage-l3","address":142,"register_type":"holding","data_type":"uint32","scale":0.001,"attribute_type":195,"name":"Spannung L3","unit":"V"},
+    {"id":"grid-import-energy","address":512,"register_type":"holding","data_type":"uint64","scale":0.0001,"attribute_type":277,"name":"Netzbezug gesamt","unit":"kWh"},
+    {"id":"grid-export-energy","address":516,"register_type":"holding","data_type":"uint64","scale":0.0001,"attribute_type":276,"name":"Netzeinspeisung gesamt","unit":"kWh"}
+  ]
+}

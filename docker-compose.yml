@@ -1,0 +1,15 @@
+services:
+  smarthomeboard-server:
+    build: .
+    container_name: smarthomeboard-server
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      SHB_TIMEZONE: "Europe/Berlin"
+    volumes:
+      - ./data:/data
+      - ./modules:/app/modules:ro
+    devices:
+      # Stabiler Gerätename des EnOcean USB300. Bei abweichender Seriennummer
+      # den Pfad aus `ls -l /dev/serial/by-id/` einsetzen.
+      - ${ENOCEAN_DEVICE:-/dev/serial/by-id/usb-EnOcean_GmbH_EnOcean_USB_300_DB_FT1ZJCMT-if00-port0}:/dev/enocean

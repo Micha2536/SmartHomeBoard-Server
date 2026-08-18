@@ -1,0 +1,11 @@
+{
+  "id": "modbus.connection-test",
+  "manufacturer": "Generisch",
+  "model": "Verbindungstest",
+  "default_unit_id": 1,
+  "minimum_poll_seconds": 2,
+  "node_profile": 0,
+  "icon": "server.rack",
+  "configuration_hint": "Prüft nur die Modbus-TCP-Verbindung und legt ein Verbindungsattribut an.",
+  "registers": []
+}
