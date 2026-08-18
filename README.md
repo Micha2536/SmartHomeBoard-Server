@@ -98,6 +98,8 @@ Konfigurationen, API-Schlüssel, Nodes, letzte Werte und Automationen liegen per
 
 ## M5Paper-Displays
 
+Die passende PlatformIO-Firmware liegt gemeinsam mit dem Server unter [`m5paper-firmware`](m5paper-firmware). Dadurch bleiben Serverprotokoll und Displayquellcode in derselben Version verfügbar. Die Firmware enthält keine WLAN-Zugangsdaten, feste Serveradresse, privaten IP-Adressen oder Gerätetokens; WLAN und Kopplung werden erst auf dem jeweiligen M5Paper eingerichtet und im ESP32-NVS gespeichert.
+
 Der Server beantwortet die lokale Gerätesuche auf UDP-Port `8788`. Ein neues M5Paper registriert sich danach selbstständig und zeigt einen sechsstelligen Kopplungscode an. Unter `http://IP-DES-PI:8400/setup/displays` erscheint es und kann dort mit diesem Code benannt und gekoppelt werden. Erst nach Bestätigung des Codes wird das Display freigeschaltet.
 
 Jedes Display besitzt eine stabile Geräte-ID und einen eigenen, zufällig erzeugten Gerätetoken. Dadurch können mehrere M5Paper unabhängig benannt und konfiguriert werden. Für jedes Gerät speichert der Server den Online-Status, die Firmwareversion, die individuelle Ansichtsdefinition und deren Versionsnummer. Das Display ruft nur seine eigene Konfiguration ab; der allgemeine Server-API-Schlüssel wird nicht auf dem M5Paper gespeichert.
