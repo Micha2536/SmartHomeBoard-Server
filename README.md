@@ -47,6 +47,17 @@ Die Datenbank und eigenen Modbus-Profile bleiben im eingebundenen `data`-Ordner 
 - `enocean`: EnOcean USB300 über das standardisierte ESP3-Protokoll mit persistentem Anlernmodus.
 - `homee`: dauerhafte lokale homee-WebSocket-Verbindung mit persistentem Gerätesnapshot und Livewerten.
 - `roborock`: persistente Roborock-Cloud-Verbindung mit E-Mail-Code-Anmeldung, Zuständen und Reinigungssteuerung.
+- `bosch-smart-home`: lokale, zertifikatsgesicherte Verbindung zum Bosch Smart Home Controller mit Livewerten, Gerätesteuerung und Szenarien.
+
+## Bosch Smart Home verbinden
+
+Die Integration arbeitet ausschließlich im lokalen Netz über den Bosch Smart Home Controller; ein Bosch-Cloudkonto wird nicht benötigt. Unter **Integrationen → Bosch Smart Home** zunächst die IP-Adresse des Controllers und einmalig dessen Systempasswort eintragen und speichern. Dann den Controller in den Kopplungsmodus versetzen: beim Smart Home Controller II die Fronttaste kurz drücken, beim Controller der ersten Generation die Taste gedrückt halten, bis die LEDs blinken. Anschließend über **Modulaktionen → Controller koppeln** die einmalige Registrierung auslösen.
+
+Der Server erzeugt bei der Kopplung einen eigenen `oss_`-Client mit eingeschränkter Rolle und ein 2048-Bit-Clientzertifikat. Zertifikat und privater Schlüssel werden persistent in der lokalen Serverdatenbank gespeichert; das Systempasswort wird nach erfolgreicher Kopplung aus der Integrationskonfiguration entfernt. Bei Serverneustarts wird nur die bestehende Zertifikatsverbindung wiederhergestellt – es findet kein erneutes Pairing und kein Cloud-Login statt.
+
+Gerätewerte werden zunächst vollständig eingelesen und anschließend über den von Bosch vorgesehenen Long-Poll-Kanal live aktualisiert. Abgebildet werden unter anderem Temperaturen, Luftfeuchtigkeit, Heizungs-Sollwerte, Fensterkontakte, Zwischenstecker, Leistung und Energie, Lichtpegel, Rollläden, Bewegungsmelder, Wassermelder, Luftqualität und weitere vom Controller bereitgestellte skalare Zustände. Schreibbare Schalter, Solltemperaturen und Positionen lassen sich aus Dashboard und Automationen ändern. Bosch-Szenarien erscheinen als eigene ausführbare Servergeräte.
+
+Die lokale Bosch-Smart-Home-API ist laut Bosch für private, nicht gewinnorientierte Nutzung vorgesehen. Diese Integration ist daher für den privaten SmartHomeBoard-Betrieb gedacht und ist keine von Bosch zertifizierte oder unterstützte Software.
 
 ## Roborock verbinden
 
@@ -243,3 +254,5 @@ Server 0.11.0 ergänzt die persistente Roborock-Integration, gemeinsame Modulakt
 Server 0.11.1 erweitert Roborock um modellabhängige Reinigungsarten, Saugstufen, Wassermengen, Raumreinigung, Routinen, Punktreinigung und einen echten Stop-Befehl. Die iOS-App besitzt dafür eine eigene Dashboard-Vorlage und blendet nur die vom jeweiligen Gerät gemeldeten Möglichkeiten ein.
 
 Server 0.11.2 ergänzt die zusammengesetzte Automationsaktion „Roborock reinigen“. Roboter, Reinigungsart, Saugstufe, Wassermenge und Ziel (komplett, Raum, Routine oder Punkt) werden gemeinsam gespeichert. Der Server setzt die gewählten Modi geschützt und nacheinander und startet die Reinigung erst danach; die Automation läuft damit auch ohne verbundenes iPad zuverlässig weiter.
+
+Server 0.12.0 ergänzt Bosch Smart Home als vollständig lokale Serverintegration. Das einmalige Controller-Pairing erzeugt persistente Clientzertifikate; danach laufen Gerätesnapshot, Long-Poll-Liveupdates, steuerbare Attribute und Bosch-Szenarien unabhängig von iPad und Bosch-Cloud auf dem Server.

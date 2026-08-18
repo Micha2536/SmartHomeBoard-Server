@@ -41,7 +41,7 @@ from .setup_portal import (
 )
 
 logging.basicConfig(level=os.getenv("SHB_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-VERSION = "0.11.2"
+VERSION = "0.12.0"
 SETUP_SESSION_COOKIE = "shb_setup_session"
 ENV_API_TOKEN = os.getenv("SHB_API_TOKEN", "").strip()
 database = Database(os.getenv("SHB_DATA_DIR", "/data"))
