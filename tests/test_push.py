@@ -109,6 +109,15 @@ class PushTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, 1)
         self.assertEqual(len(client.requests), 2)
 
+    async def test_new_token_replaces_previous_token_of_same_device(self):
+        replacement = "c" * 64
+        count = self.service.register(replacement, "sandbox", "Aktuelles iPad")
+
+        self.assertEqual(count, 2)
+        devices = self.database.setting("push_devices", [])
+        self.assertNotIn(self.valid_token, [item["device_token"] for item in devices])
+        self.assertIn(replacement, [item["device_token"] for item in devices])
+
 
 if __name__ == "__main__":
     unittest.main()

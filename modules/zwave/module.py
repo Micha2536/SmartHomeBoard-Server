@@ -16,7 +16,7 @@ def manifest():
     return {
         "id": "zwave",
         "name": "Z-Wave",
-        "version": "1.0.0",
+        "version": "1.0.1",
         "icon": "wave.3.right",
         "description": (
             "Lokale Z-Wave-Integration über den offiziellen Z-Wave-JS-Treiber. "
@@ -322,20 +322,36 @@ class ZWaveAdapter:
 def _presentable_values(node):
     values = list(node.values.values())
     by_key = {(value.command_class, value.endpoint or 0, value.property_, value.property_key): value for value in values}
-    skipped = set()
     result = []
     pairs = {"currentValue": "targetValue", "currentState": "targetState", "currentColor": "targetColor"}
+    reverse_pairs = {target: current for current, target in pairs.items()}
+    consumed = set()
     for value in values:
-        if value.value_id in skipped or not _is_presentable(value):
+        if value.value_id in consumed or not _is_presentable(value):
             continue
+        property_name = str(value.property_)
+        feedback = value
         command = value if value.metadata.writeable else None
-        target_property = pairs.get(str(value.property_))
+
+        # Z-Wave JS exposes many actuators as separate current/target values.
+        # Always publish the current value as feedback and use only the target
+        # value for writes, regardless of the order returned by Z-Wave JS.
+        current_property = reverse_pairs.get(property_name)
+        if current_property:
+            current = by_key.get((value.command_class, value.endpoint or 0, current_property, value.property_key))
+            if current and _is_presentable(current):
+                feedback = current
+                command = value if value.metadata.writeable else None
+                consumed.add(current.value_id)
+
+        target_property = pairs.get(str(feedback.property_))
         if target_property:
-            target = by_key.get((value.command_class, value.endpoint or 0, target_property, value.property_key))
+            target = by_key.get((feedback.command_class, feedback.endpoint or 0, target_property, feedback.property_key))
             if target and target.metadata.writeable:
                 command = target
-                skipped.add(target.value_id)
-        result.append((value, command))
+                consumed.add(target.value_id)
+        consumed.add(feedback.value_id)
+        result.append((feedback, command))
     return sorted(result, key=lambda pair: pair[0].value_id)
 
 
@@ -364,7 +380,8 @@ def _attribute_from_value(node_id, attribute_id, value, command):
         "editable": command is not None, "last_changed": time.time(),
     }
     if command is not None:
-        item["target_value"] = item["current_value"]
+        target_numeric = _numeric(command.value)
+        item["target_value"] = target_numeric if target_numeric is not None else item["current_value"]
     if states:
         selected = next((text for number, text in states if numeric is not None and abs(number - numeric) < 0.000001), str(raw or ""))
         item["unit"] = "choice"

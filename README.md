@@ -2,6 +2,8 @@
 
 Der Server verlagert Geräteverbindungen, Zustände und Automationen aus der iOS-App auf einen dauerhaft laufenden Raspberry Pi. Die App bleibt Konfigurationsoberfläche und Dashboard.
 
+Server 0.16.0 trennt bei Z-Wave-Aktoren Rückmeldung und Befehl eindeutig: `current_value` enthält ausschließlich den vom Gerät gemeldeten Istwert, `target_value` den über Z-Wave JS schreibbaren Sollwert. Zusammengehörige `currentValue`-/`targetValue`-Paare werden unabhängig von ihrer Lieferreihenfolge als genau ein bedienbares Attribut angelegt.
+
 ## Raspberry Pi installieren
 
 Voraussetzung sind ein Raspberry Pi oder Linux-Rechner mit installiertem Docker und Docker Compose. Das Repository wird direkt von GitHub geladen:
@@ -49,6 +51,10 @@ Ab Server 0.15.5 verwenden der API-Prozess der iOS-App und der getrennte Webport
 Server 0.15.6 verarbeitet beim Push-Empfänger „Alle Geräte“ jeden APNs-Token unabhängig. Ein abgelaufener, widerrufener oder zur falschen Umgebung gehörender Empfänger blockiert dadurch nicht mehr die Zustellung an die übrigen Geräte. Von Apple ausdrücklich als ungültig gemeldete Gerätetokens werden automatisch aus der Empfängerliste entfernt.
 
 Server 0.15.7 führt im Webportal schrittweise durch die Automationserstellung. Technische homee-Attributtypen werden als verständliche deutsche Eigenschaften dargestellt; aktueller Wert, Einheit und Wertebereich erscheinen direkt bei der Auswahl. Binäre Werte werden beispielsweise als Ein/Aus, Geöffnet/Geschlossen oder Alarm/Kein Alarm angeboten.
+
+Server 0.15.8 ersetzt bei einer erneuten Push-Registrierung automatisch den vorherigen APNs-Token desselben iPhones oder iPads. Dadurch können alte Tokens nach einer Neuinstallation nicht mehr einen irreführend erfolgreichen Sammelversand vortäuschen.
+
+Server 0.15.9 unterstützt frei platzierbare Werte in Push-Texten: `{name}` für den Gerätenamen, `{attribute}` für die Eigenschaft, `{value}` für den reinen Wert und `{unit}` für die Einheit. Die bisherigen Platzhalter bleiben aus Kompatibilitätsgründen erhalten.
 
 ## Server aktualisieren
 
@@ -313,17 +319,70 @@ Auf dem Docker-Host zuerst den stabilen Stick-Pfad bestimmen:
 ls -l /dev/serial/by-id/
 ```
 
-Danach im Projektverzeichnis eine `.env` mit diesem Pfad anlegen, beispielsweise:
+In der Ausgabe den Eintrag des Z-Wave-Sticks auswählen. Nicht `/dev/ttyUSB0` oder `/dev/ttyACM0` verwenden, weil sich diese Namen nach einem Neustart oder beim Umstecken ändern können. Ein CP2102/CP2102N-Stick erscheint beispielsweise als `usb-Silicon_Labs_CP2102N_...-if00-port0`.
+
+Danach die Vorlage kopieren und im Projektverzeichnis die lokale `.env` bearbeiten:
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Mindestens den vollständigen Z-Wave-Pfad und ein eigenes langes Sitzungsgeheimnis eintragen:
 
 ```dotenv
-ZWAVE_DEVICE=/dev/serial/by-id/usb-0658_0200-if00
+ZWAVE_DEVICE=/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_SERIENNUMMER-if00-port0
 ZWAVE_SESSION_SECRET=eine-lange-zufaellige-zeichenfolge
 ```
 
-Z-Wave JS UI und SmartHomeBoard anschließend gemeinsam starten:
+`ENOCEAN_DEVICE` muss nur gesetzt werden, wenn zusätzlich ein EnOcean USB300 verwendet wird. Ohne diese Angabe startet eine reine Z-Wave-Installation mit einem neutralen Geräteplatzhalter.
+
+Z-Wave JS UI und SmartHomeBoard anschließend gemeinsam erstellen und starten:
 
 ```bash
 docker compose --profile zwave up -d --build
 ```
 
-Die Z-Wave-JS-Oberfläche ist im lokalen Netz unter `http://SERVER-IP:8091` erreichbar. Dort einmalig die vier Z-Wave-Sicherheitsschlüssel erzeugen und den Z-Wave-JS-WebSocket-Server auf Port `3000` aktivieren. Danach im SmartHomeBoard-Webportal eine Z-Wave-Integration mit `ws://127.0.0.1:3000` anlegen. Der WebSocket-Server besitzt keine eigene Authentifizierung und sollte deshalb nicht über Router oder Reverse Proxy ins Internet freigegeben werden.
+Den Startzustand bei Bedarf prüfen:
+
+```bash
+docker compose --profile zwave ps
+docker compose logs --tail=100 zwave-js-ui
+```
+
+### Z-Wave JS UI einmalig einrichten
+
+1. Im lokalen Netz `http://SERVER-IP:8091` öffnen.
+2. Unter **Settings → Z-Wave** kontrollieren, dass als serieller Port `/dev/zwave` verwendet wird. Die Compose-Konfiguration setzt diesen Port bereits über `ZWAVE_PORT` und aktiviert damit den Treiber.
+3. Die Sicherheitsschlüssel für **S0**, **S2 Unauthenticated**, **S2 Authenticated** und **S2 Access Control** einmalig erzeugen und die Einstellungen speichern. Diese Schlüssel danach nicht neu erzeugen: Bereits sicher angelernte Geräte benötigen weiterhin dieselben Schlüssel.
+4. Den **Z-Wave JS WebSocket Server** aktivieren und Port `3000` verwenden. MQTT wird für SmartHomeBoard nicht benötigt.
+5. Warten, bis der Controller bereit ist und in der Oberfläche seine Home-ID angezeigt wird.
+
+### Mit SmartHomeBoard verbinden
+
+1. Das SmartHomeBoard-Webportal unter `http://SERVER-IP:8400/setup` öffnen.
+2. Unter **Integrationen** eine neue Integration **Z-Wave** anlegen.
+3. Als WebSocket-Adresse `ws://127.0.0.1:3000` eintragen und speichern. Durch `network_mode: host` erreichen sich beide Container über diese lokale Adresse.
+4. Nach erfolgreicher Verbindung können Geräte im Z-Wave-Bereich angelernt, ausgeschlossen und bei S2-Geräten mit der fünfstelligen PIN bestätigt werden.
+
+Der Z-Wave-JS-WebSocket besitzt keine eigene Anmeldung. Port `3000` deshalb nicht am Router freigeben und nicht öffentlich über einen Reverse Proxy erreichbar machen. Auch die Verwaltungsoberfläche auf Port `8091` sollte nur im vertrauenswürdigen lokalen Netz oder über ein VPN erreichbar sein.
+
+### Aktualisieren, sichern und Fehler suchen
+
+Bei späteren Serveraktualisierungen immer auch das Z-Wave-Profil angeben:
+
+```bash
+git pull
+docker compose --profile zwave up -d --build
+```
+
+Die Z-Wave-Konfiguration, Sicherheitsschlüssel und Treiberdaten liegen persistent im lokalen Ordner `zwave-store/`. Diesen Ordner regelmäßig sichern, aber wegen der enthaltenen Schlüssel weder veröffentlichen noch in Git einchecken. Den USB-Stick darf immer nur Z-Wave JS UI öffnen; in SmartHomeBoard wird ausschließlich die WebSocket-Adresse eingetragen.
+
+Wenn der Controller nicht startet, zuerst prüfen:
+
+```bash
+test -e "$(grep '^ZWAVE_DEVICE=' .env | cut -d= -f2-)" && echo "Stick gefunden"
+docker compose logs --tail=200 zwave-js-ui
+```
+
+Typische Ursachen sind ein falscher `by-id`-Pfad, ein nachträglich getauschter USB-Stick, fehlende USB-Durchreichung in einer VM oder ein zweiter Dienst, der den Controller bereits geöffnet hat.

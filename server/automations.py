@@ -1,7 +1,9 @@
 import asyncio
 import datetime as dt
+import json
 import logging
 import time
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger("smarthomeboard.automations")
@@ -355,22 +357,35 @@ class AutomationEngine:
             attribute = self._attribute(action)
             if not node or not attribute:
                 raise ValueError("Das Geräteattribut der Push-Nachricht ist nicht verfügbar")
+            unit = unquote(str(attribute.get("unit") or "")).strip()
             value = attribute.get("current_value")
             if value is None:
                 value = attribute.get("target_value", "")
-            unit = str(attribute.get("unit") or "").strip()
-            selected_value = f"{value:g}" if isinstance(value, (int, float)) else str(value)
-            if unit:
-                selected_value = f"{selected_value} {unit}"
+            if unit.casefold() == "text":
+                unit = ""
+                data = attribute.get("data", "")
+                try:
+                    parsed = json.loads(data) if isinstance(data, str) else data
+                    value = parsed.get("label", parsed.get("value", data)) if isinstance(parsed, dict) else parsed
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    value = data
+            value_text = f"{value:g}" if isinstance(value, (int, float)) else unquote(str(value))
+            selected_value = f"{value_text} {unit}".strip()
+            device_name = unquote(str(node.get("name") or f"Gerät {node.get('id')}"))
+            attribute_name = unquote(str(attribute.get("name") or f"Attribut {attribute.get('id')}"))
             selected = {
-                "{selectedDevice}": str(node.get("name") or f"Gerät {node.get('id')}"),
-                "{selectedAttribute}": str(attribute.get("name") or f"Attribut {attribute.get('id')}"),
+                "{name}": device_name,
+                "{value}": value_text,
+                "{unit}": unit,
+                "{attribute}": attribute_name,
+                "{selectedDevice}": device_name,
+                "{selectedAttribute}": attribute_name,
                 "{selectedValue}": selected_value,
             }
             contains_placeholder = any(token in title or token in message for token in selected)
             replacements.update(selected)
             if not contains_placeholder:
-                message = f"{message} · {selected['{selectedDevice}']} – {selected['{selectedAttribute}']}: {selected_value}"
+                message = f"{message} · {device_name} – {attribute_name}: {selected_value}"
         for token, value in replacements.items():
             title = title.replace(token, value)
             message = message.replace(token, value)

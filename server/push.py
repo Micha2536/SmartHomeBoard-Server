@@ -59,14 +59,26 @@ class PushService:
         token = str(device_token).strip().lower()
         if len(token) < 32 or any(character not in "0123456789abcdef" for character in token):
             raise ValueError("Der APNs-Gerätetoken ist ungültig")
+        normalized_environment = "sandbox" if environment == "sandbox" else "production"
+        normalized_name = str(device_name or "iPhone/iPad")[:100]
         item = {
             "id": hashlib.sha256(token.encode()).hexdigest()[:24],
             "device_token": token,
-            "environment": "sandbox" if environment == "sandbox" else "production",
-            "device_name": str(device_name or "iPhone/iPad")[:100],
+            "environment": normalized_environment,
+            "device_name": normalized_name,
             "updated_at": time.time(),
         }
-        devices = [entry for entry in (self.database.setting("push_devices", []) or []) if entry.get("device_token") != token]
+        # Eine Neuinstallation erzeugt einen neuen APNs-Token. Der bisherige
+        # Token desselben benannten Geräts darf nicht als scheinbar erfolgreicher
+        # Alt-Empfänger erhalten bleiben.
+        devices = [
+            entry for entry in (self.database.setting("push_devices", []) or [])
+            if entry.get("device_token") != token
+            and not (
+                str(entry.get("device_name", "")).casefold() == normalized_name.casefold()
+                and entry.get("environment") == normalized_environment
+            )
+        ]
         devices.append(item)
         self.database.set_setting("push_devices", devices[-50:])
         return len(devices)

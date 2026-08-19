@@ -79,9 +79,27 @@ class ZWaveTests(unittest.IsolatedAsyncioTestCase):
 
     def test_current_and_target_values_are_merged_into_one_control(self):
         current = FakeValue("7-37-0-currentValue", 37, "currentValue", False, FakeMetadata("Schalter", type_="boolean"))
-        target = FakeValue("7-37-0-targetValue", 37, "targetValue", False, FakeMetadata("Schalter", type_="boolean", writeable=True))
+        target = FakeValue("7-37-0-targetValue", 37, "targetValue", True, FakeMetadata("Schalter", type_="boolean", writeable=True))
         pairs = MODULE._presentable_values(FakeNode([current, target]))
         self.assertEqual([(current, target)], pairs)
+
+        # Z-Wave JS does not guarantee that currentValue is listed first.
+        reverse_pairs = MODULE._presentable_values(FakeNode([target, current]))
+        self.assertEqual([(current, target)], reverse_pairs)
+
+        attribute = MODULE._attribute_from_value(1, 101, current, target)
+        self.assertEqual(0, attribute["current_value"])
+        self.assertEqual(1, attribute["target_value"])
+        self.assertTrue(attribute["editable"])
+
+    def test_read_only_feedback_has_no_target_value(self):
+        current = FakeValue("temperature", 49, "Air temperature", 21.75, FakeMetadata("Lufttemperatur", unit="°C"))
+        pairs = MODULE._presentable_values(FakeNode([current]))
+        self.assertEqual([(current, None)], pairs)
+        attribute = MODULE._attribute_from_value(1, 101, *pairs[0])
+        self.assertEqual(21.75, attribute["current_value"])
+        self.assertNotIn("target_value", attribute)
+        self.assertFalse(attribute["editable"])
 
     async def test_common_values_map_to_homee_compatible_attributes(self):
         values = [

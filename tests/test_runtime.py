@@ -256,14 +256,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         engine.push_service = Push()
         action = {
-            "id": "push", "kind": "serverPushNotification", "title": "Alarm {selectedDevice}",
-            "message": "Wert {selectedValue}", "includeAttributeValue": True,
+            "id": "push", "kind": "serverPushNotification", "title": "Alarm {name}",
+            "message": "{attribute}: {value} {unit}", "includeAttributeValue": True,
             "nodeID": node["id"], "attributeID": attribute["id"], "pushDeviceIDs": ["ipad-flur"],
         }
         await engine._execute({"id": "source", "name": "Quelle"}, action, {}, "source:push")
         self.assertEqual(["ipad-flur"], calls[0][2])
         self.assertIn(node["name"], calls[0][0])
-        self.assertIn(f"{attribute['current_value']:g}", calls[0][1])
+        self.assertEqual(
+            f"{attribute['name']}: {attribute['current_value']:g} {attribute['unit']}",
+            calls[0][1],
+        )
 
 
 if __name__ == "__main__":

@@ -17,9 +17,9 @@ services:
       - ./modules:/app/modules:ro
       - ./secrets:/run/secrets:ro
     devices:
-      # Stabiler Gerätename des EnOcean USB300. Bei abweichender Seriennummer
-      # den Pfad aus `ls -l /dev/serial/by-id/` einsetzen.
-      - ${ENOCEAN_DEVICE:-/dev/serial/by-id/usb-EnOcean_GmbH_EnOcean_USB_300_DB_FT1ZJCMT-if00-port0}:/dev/enocean
+      # Optionaler EnOcean USB300. Ohne ENOCEAN_DEVICE bleibt der neutrale
+      # Platzhalter aktiv, damit reine Z-Wave-Installationen ebenfalls starten.
+      - ${ENOCEAN_DEVICE:-/dev/null}:/dev/enocean
 
   zwave-js-ui:
     image: zwavejs/zwave-js-ui:11
