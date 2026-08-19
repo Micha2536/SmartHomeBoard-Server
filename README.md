@@ -28,6 +28,28 @@ Alternativ kann unter **Code → Download ZIP** ein Archiv heruntergeladen, auf 
 
 Der Container verwendet auf Linux `network_mode: host`. Das ist für lokale Geräte, UDP, Broadcast und Multicast sinnvoll. Die Einrichtungsseite bleibt immer auf Port `8400` erreichbar. Die API läuft getrennt auf dem frei wählbaren Kommunikationsport. Port `8400` kann deshalb nicht als Kommunikationsport gewählt werden.
 
+## Push-Nachrichten und Automationsempfänger
+
+Nach Zustimmung zur iOS-Mitteilungserlaubnis registriert sich jedes iPhone oder iPad automatisch mit seinem Gerätenamen beim lokalen Server. Unter **Automationen → Push-Nachricht vom Server** kann anschließend an alle registrierten Geräte oder gezielt an einen oder mehrere Empfänger gesendet werden. In den Automationen werden nur stabile interne Empfänger-IDs gespeichert; die eigentlichen APNs-Gerätetokens zeigt das Portal nicht an.
+
+Für die Zustellung bei geschlossener App benötigt der Server einen Apple-APNs-Schlüssel. Die von Apple geladene `.p8`-Datei wird als `secrets/AuthKey.p8` abgelegt und nicht eingecheckt. Daneben wird eine `.env` angelegt:
+
+```text
+SHB_APNS_TEAM_ID=DEINE_APPLE_TEAM_ID
+SHB_APNS_KEY_ID=DEINE_APNS_KEY_ID
+SHB_APNS_BUNDLE_ID=Michael.SmartHomeBoard
+```
+
+Danach den Server mit `docker compose up -d --build` neu erstellen. Das Webportal zeigt im Automationsbereich, ob der Schlüssel vollständig konfiguriert ist und wie viele iOS-Geräte registriert sind. Eigene Texte können mit einem ausgewählten Gerätewert ergänzt werden; dafür stehen `{selectedDevice}`, `{selectedAttribute}` und `{selectedValue}` zur Verfügung. Ohne Platzhalter hängt der Server den ausgewählten Wert lesbar an den Nachrichtentext an.
+
+Automationen können außerdem andere Automationen **abspielen**, **stoppen**, **aktivieren** oder **deaktivieren**. Stoppen bricht auch bereits wartende, verzögerte Aktionen ab. Gegenseitige Endlosschleifen werden serverseitig erkannt und verhindert.
+
+Ab Server 0.15.5 verwenden der API-Prozess der iOS-App und der getrennte Webportal-Prozess SQLite konsequent als gemeinsamen Automationsstand. Änderungen aus der App erscheinen dadurch ohne Serverneustart im Webportal; Webänderungen werden vor der nächsten App-Synchronisierung eingelesen und bleiben erhalten. Die Automationsliste im Webportal aktualisiert sich alle zwei Sekunden im Hintergrund, ohne die Seite neu zu laden oder ihre Scrollposition zu verändern.
+
+Server 0.15.6 verarbeitet beim Push-Empfänger „Alle Geräte“ jeden APNs-Token unabhängig. Ein abgelaufener, widerrufener oder zur falschen Umgebung gehörender Empfänger blockiert dadurch nicht mehr die Zustellung an die übrigen Geräte. Von Apple ausdrücklich als ungültig gemeldete Gerätetokens werden automatisch aus der Empfängerliste entfernt.
+
+Server 0.15.7 führt im Webportal schrittweise durch die Automationserstellung. Technische homee-Attributtypen werden als verständliche deutsche Eigenschaften dargestellt; aktueller Wert, Einheit und Wertebereich erscheinen direkt bei der Auswahl. Binäre Werte werden beispielsweise als Ein/Aus, Geöffnet/Geschlossen oder Alarm/Kein Alarm angeboten.
+
 ## Server aktualisieren
 
 Vor einem Update sollte der persistente Ordner `data` gesichert werden. Anschließend im Repository ausführen:
@@ -272,3 +294,36 @@ Für MotionBlinds werden die feste IP-Adresse des WLAN-Gateways und dessen Secre
 Server 0.14.0 ergänzt im Webportal einen vollständigen No-Code-Editor für persistente Serverautomationen. Auslöser können Gerätewerte, Wertänderungen, tägliche Uhrzeiten oder einmalige Zeitpunkte sein. UND-Bedingungen unterstützen Gerätewerte sowie Zeitfenster. Als lokale Aktionen stehen das Setzen und Umschalten steuerbarer Attribute sowie die zusammengesetzte Roborock-Reinigung mit Modus, Saugstufe, Wassermenge und Ziel zur Verfügung. Mehrere Auslöser, Bedingungen und verzögerte Aktionen können direkt im Browser ergänzt, bearbeitet, getestet und gelöscht werden.
 
 Eine im Webportal neu angelegte oder dort bearbeitete Regel wird serververwaltet. Die iPad-Synchronisierung aktualisiert weiterhin App-Regeln, überschreibt serververwaltete Regeln aber nicht und löscht sie auch nicht. Dadurch kann der Server vollständig ohne iPad konfiguriert werden, während beide Oberflächen parallel nutzbar bleiben.
+
+Server 0.14.1 dekodiert URL-kodierte Anzeigenamen, Attributnamen, Einheiten und Auswahltexte im Webportal zentral. Dadurch erscheinen beispielsweise `%20` als Leerzeichen und UTF-8-Sequenzen wieder als lesbare Umlaute, ohne die persistent gespeicherten Rohwerte oder Gerätezuordnungen zu verändern.
+
+## Z-Wave
+
+Server 0.15.0 ergänzt Z-Wave als persistente lokale Integration. Der offizielle Z-Wave-JS-Treiber besitzt exklusiv den USB-Stick; SmartHomeBoard verbindet sich lokal mit dessen WebSocket-Server und übernimmt Geräte, Livewerte, schreibbare Attribute, Anlernen und Ausschließen. S2-Sicherheitsklassen werden bestätigt, die fünfstellige Geräte-PIN kann bei Bedarf direkt im SmartHomeBoard-Webportal eingegeben werden.
+
+Server 0.15.1 übernimmt zusätzlich die von jedem Gerät gemeldete Hersteller-ID, den Produkttyp, die Produkt-ID und Firmwareversion sowie die von der offiziellen Z-Wave-JS Config DB aufgelösten Hersteller-, Produkt- und Geräteklassenbezeichnungen. Alle lesbaren skalaren Eigenschaften und Endpunkte werden weiterhin automatisch als SmartHomeBoard-Attribute angelegt; geheime Schlüssel und interne Konfigurationswerte bleiben ausgeblendet.
+
+Server 0.15.2 synchronisiert den angezeigten Z-Wave-Anlernstatus direkt mit dem `inclusionState` des Controllers. Erfolgreiches Anlernen, Zeitablauf, manueller Abbruch, Fehler und Ausschluss setzen den Webportalstatus dadurch zuverlässig zurück; ein vom Controller abgelehnter Start wird nicht mehr fälschlich als aktiv angezeigt.
+
+Server 0.15.3 führt bei Bosch Smart Home den virtuellen `roomClimateControl` und die zugehörigen Raum- oder Heizkörperthermostate anhand ihrer Bosch-Raum-ID zu einem Heizungsgerät zusammen. Dieses enthält gemeinsam Isttemperatur, Luftfeuchtigkeit, Solltemperatur, den veränderbaren Betriebsmodus, Boost und Sommermodus. Die Node-ID des physischen Thermostats bleibt erhalten; der überholte virtuelle Doppel-Node wird beim nächsten Einlesen entfernt.
+
+Auf dem Docker-Host zuerst den stabilen Stick-Pfad bestimmen:
+
+```bash
+ls -l /dev/serial/by-id/
+```
+
+Danach im Projektverzeichnis eine `.env` mit diesem Pfad anlegen, beispielsweise:
+
+```dotenv
+ZWAVE_DEVICE=/dev/serial/by-id/usb-0658_0200-if00
+ZWAVE_SESSION_SECRET=eine-lange-zufaellige-zeichenfolge
+```
+
+Z-Wave JS UI und SmartHomeBoard anschließend gemeinsam starten:
+
+```bash
+docker compose --profile zwave up -d --build
+```
+
+Die Z-Wave-JS-Oberfläche ist im lokalen Netz unter `http://SERVER-IP:8091` erreichbar. Dort einmalig die vier Z-Wave-Sicherheitsschlüssel erzeugen und den Z-Wave-JS-WebSocket-Server auf Port `3000` aktivieren. Danach im SmartHomeBoard-Webportal eine Z-Wave-Integration mit `ws://127.0.0.1:3000` anlegen. Der WebSocket-Server besitzt keine eigene Authentifizierung und sollte deshalb nicht über Router oder Reverse Proxy ins Internet freigegeben werden.

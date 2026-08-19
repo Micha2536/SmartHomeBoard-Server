@@ -123,6 +123,25 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("server", origins["server-rule"])
         self.assertEqual("app", origins["app-rule"])
 
+    async def test_separate_api_and_setup_engines_share_current_automation_state(self):
+        api_engine = AutomationEngine(self.runtime)
+        setup_engine = AutomationEngine(self.runtime)
+        app_rule = {"id": "app-rule", "name": "Vom iPad", "isEnabled": True,
+                    "triggers": [], "conditions": [], "actions": []}
+        server_rule = {"id": "server-rule", "name": "Vom Webportal", "isEnabled": True,
+                       "triggers": [], "conditions": [], "actions": []}
+
+        api_engine.replace_from_app([app_rule])
+        self.assertEqual(["app-rule"], [rule["id"] for rule in setup_engine.status()["automations"]])
+
+        setup_engine.upsert_server(server_rule)
+        api_engine.replace_from_app([{**app_rule, "name": "Vom iPad geändert"}])
+        self.assertEqual(
+            {"app-rule", "server-rule"},
+            {rule["id"] for rule in setup_engine.status()["automations"]},
+        )
+        self.assertEqual("Vom iPad geändert", next(rule for rule in setup_engine.rules if rule["id"] == "app-rule")["name"])
+
     async def test_web_deleted_rule_is_not_recreated_by_next_app_sync(self):
         engine = AutomationEngine(self.runtime)
         rule = {"id": "shared-rule", "name": "Geteilt", "isEnabled": True,
@@ -199,6 +218,52 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, [("demo-1", "automation_cleaning", action)])
         self.assertIn("atomar am Roborock ausgeführt", engine.events[-1]["message"])
+
+    async def test_automation_can_stop_disable_enable_and_play_another_rule(self):
+        engine = AutomationEngine(self.runtime)
+        target = {
+            "id": "target", "name": "Ziel", "isEnabled": True,
+            "triggers": [], "conditions": [],
+            "actions": [{"id": "wait", "kind": "showPopup", "delaySeconds": 60}],
+        }
+        engine.replace([target])
+        await engine._trigger(target, {}, ignore_cooldown=True)
+        self.assertTrue(engine.status()["automations"][0]["running"])
+
+        stopped = await engine.control("target", "stop", source_rule_id="source")
+        self.assertTrue(stopped["ok"])
+        self.assertFalse(engine.status()["automations"][0]["running"])
+
+        disabled = await engine.control("target", "disable", source_rule_id="source")
+        self.assertTrue(disabled["ok"])
+        self.assertFalse(target["isEnabled"])
+        self.assertFalse((await engine.control("target", "play", source_rule_id="source"))["ok"])
+
+        self.assertTrue((await engine.control("target", "enable", source_rule_id="source"))["ok"])
+        self.assertTrue((await engine.control("target", "play", source_rule_id="source"))["ok"])
+        engine._cancel_rule_tasks("target")
+
+    async def test_push_action_passes_selected_recipients_and_device_value(self):
+        engine = AutomationEngine(self.runtime)
+        node = self.database.nodes()[0]
+        attribute = node["attributes"][0]
+        calls = []
+
+        class Push:
+            async def send(_self, title, message, recipients):
+                calls.append((title, message, recipients))
+                return 1
+
+        engine.push_service = Push()
+        action = {
+            "id": "push", "kind": "serverPushNotification", "title": "Alarm {selectedDevice}",
+            "message": "Wert {selectedValue}", "includeAttributeValue": True,
+            "nodeID": node["id"], "attributeID": attribute["id"], "pushDeviceIDs": ["ipad-flur"],
+        }
+        await engine._execute({"id": "source", "name": "Quelle"}, action, {}, "source:push")
+        self.assertEqual(["ipad-flur"], calls[0][2])
+        self.assertIn(node["name"], calls[0][0])
+        self.assertIn(f"{attribute['current_value']:g}", calls[0][1])
 
 
 if __name__ == "__main__":

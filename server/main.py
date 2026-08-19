@@ -34,6 +34,7 @@ from .display_discovery import start_display_discovery
 from .homee_enums import ATTRIBUTE_TYPES, NODE_PROFILES
 from .modules import ModuleRegistry
 from .runtime import Runtime
+from .push import PushService
 from .setup_portal import (
     automations_page as portal_automations,
     dashboard as portal_dashboard,
@@ -42,13 +43,15 @@ from .setup_portal import (
 )
 
 logging.basicConfig(level=os.getenv("SHB_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-VERSION = "0.14.0"
+VERSION = "0.15.7"
 SETUP_SESSION_COOKIE = "shb_setup_session"
 ENV_API_TOKEN = os.getenv("SHB_API_TOKEN", "").strip()
 database = Database(os.getenv("SHB_DATA_DIR", "/data"))
 registry = ModuleRegistry(os.getenv("SHB_MODULE_DIR", "/app/modules"))
 runtime = Runtime(database, registry)
 automation_engine = AutomationEngine(runtime, os.getenv("SHB_TIMEZONE", "Europe/Berlin"))
+push_service = PushService(database)
+automation_engine.push_service = push_service
 runtime.automation_engine = automation_engine
 
 
@@ -69,6 +72,20 @@ class AttributeCommand(BaseModel):
 
 class AutomationPayload(BaseModel):
     automations: list[dict] = Field(default_factory=list)
+
+
+class AutomationControlPayload(BaseModel):
+    operation: str
+
+
+class PushDevicePayload(BaseModel):
+    device_token: str = Field(min_length=32, max_length=256)
+    environment: str = "production"
+    device_name: str = Field(default="iPhone/iPad", max_length=100)
+
+
+class PushActionPayload(BaseModel):
+    action: dict
 
 
 class ModbusProfilePayload(BaseModel):
@@ -291,7 +308,12 @@ async def perform_setup_integration_action(request: Request):
         )
     message, error, status_code = "", "", 200
     try:
-        response = await call_local_api(f"api/v1/integrations/{integration_id}/actions/{action_id}", {"payload": {}})
+        payload = {
+            key.removeprefix("payload__"): entries[-1]
+            for key, entries in values.items()
+            if key.startswith("payload__") and entries
+        }
+        response = await call_local_api(f"api/v1/integrations/{integration_id}/actions/{action_id}", {"payload": payload})
         result = response.get("result", {}) if isinstance(response, dict) else {}
         message = str(result.get("message") or "Die Modulaktion wurde ausgeführt.")
     except (ValueError, httpx.HTTPError) as action_error:
@@ -421,6 +443,11 @@ async def setup_automations_page(request: Request):
         selected_id=request.query_params.get("edit", ""),
         authenticated=setup_session_authenticated(request), token_required=bool(effective_api_token()),
     )
+
+
+@setup_app.get("/setup/automations/status", response_class=JSONResponse, include_in_schema=False)
+async def setup_automations_status():
+    return automation_engine.status()
 
 
 @setup_app.post("/setup", response_class=HTMLResponse, include_in_schema=False)
@@ -794,7 +821,27 @@ def _validate_web_action(source, nodes):
             if source.get(key) not in (None, ""):
                 result[key] = _finite_number(source[key], key)
         return result
-    raise ValueError("Im Webportal sind nur lokale Geräteaktionen und Roborock-Reinigungen erlaubt")
+    if kind == "controlAutomation":
+        automation_id = str(source.get("automationID", "")).strip()
+        if not automation_id:
+            raise ValueError("Für die Automationssteuerung muss eine Zielautomation gewählt werden")
+        operation = str(source.get("automationOperation", "play"))
+        if operation not in ("play", "stop", "enable", "disable"):
+            raise ValueError("Der Automationsbefehl ist ungültig")
+        result.update({"automationID": automation_id, "automationOperation": operation})
+        return result
+    if kind == "serverPushNotification":
+        result.update({
+            "title": str(source.get("title") or "SmartHomeBoard")[:180],
+            "message": str(source.get("message") or "Automation wurde ausgeführt.")[:1500],
+            "includeAttributeValue": bool(source.get("includeAttributeValue", False)),
+            "pushDeviceIDs": [str(item) for item in source.get("pushDeviceIDs", []) if str(item)],
+        })
+        if result["includeAttributeValue"]:
+            node_id, attribute_id, _attribute = _automation_attribute(source, nodes)
+            result.update({"nodeID": node_id, "attributeID": attribute_id})
+        return result
+    raise ValueError("Diese Automationsaktion wird vom Webportal nicht unterstützt")
 
 
 def _automation_attribute(source, nodes):
@@ -1525,6 +1572,7 @@ async def save_automations(payload: AutomationPayload):
 
 @app.get("/api/v1/automations")
 async def automations():
+    automation_engine.refresh_from_database()
     return {"automations": automation_engine.rules}
 
 
@@ -1539,6 +1587,38 @@ async def test_automation(rule_id: str):
     if not result["ok"]:
         raise HTTPException(status_code=409, detail=result["message"])
     return result
+
+
+@app.post("/api/v1/automations/{rule_id}/control")
+async def control_automation(rule_id: str, payload: AutomationControlPayload):
+    result = await automation_engine.control(rule_id, payload.operation)
+    if not result["ok"]:
+        raise HTTPException(status_code=409, detail=result["message"])
+    return result
+
+
+@app.post("/api/v1/push/devices")
+async def register_push_device(payload: PushDevicePayload):
+    try:
+        count = push_service.register(payload.device_token, payload.environment, payload.device_name)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {"ok": True, "message": f"Push-Gerät registriert ({count})"}
+
+
+@app.get("/api/v1/push/status")
+async def push_status():
+    return push_service.status()
+
+
+@app.post("/api/v1/push/send")
+async def send_push(payload: PushActionPayload):
+    try:
+        title, message = automation_engine._push_text(payload.action, {})
+        count = await push_service.send(title, message, payload.action.get("pushDeviceIDs"))
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    return {"ok": True, "message": f"Push-Nachricht an {count} iOS-Gerät(e) gesendet"}
 
 
 @app.websocket("/api/v1/events")

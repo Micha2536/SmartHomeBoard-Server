@@ -6,10 +6,36 @@ services:
     network_mode: host
     environment:
       SHB_TIMEZONE: "Europe/Berlin"
+      # Für Push-Nachrichten zusätzlich in .env setzen. Die .p8-Datei liegt
+      # lokal im nicht eingecheckten Ordner secrets/.
+      SHB_APNS_TEAM_ID: "${SHB_APNS_TEAM_ID:-}"
+      SHB_APNS_KEY_ID: "${SHB_APNS_KEY_ID:-}"
+      SHB_APNS_BUNDLE_ID: "${SHB_APNS_BUNDLE_ID:-Michael.SmartHomeBoard}"
+      SHB_APNS_KEY_PATH: "${SHB_APNS_KEY_PATH:-/run/secrets/AuthKey.p8}"
     volumes:
       - ./data:/data
       - ./modules:/app/modules:ro
+      - ./secrets:/run/secrets:ro
     devices:
       # Stabiler Gerätename des EnOcean USB300. Bei abweichender Seriennummer
       # den Pfad aus `ls -l /dev/serial/by-id/` einsetzen.
       - ${ENOCEAN_DEVICE:-/dev/serial/by-id/usb-EnOcean_GmbH_EnOcean_USB_300_DB_FT1ZJCMT-if00-port0}:/dev/enocean
+
+  zwave-js-ui:
+    image: zwavejs/zwave-js-ui:11
+    container_name: zwave-js-ui
+    profiles: ["zwave"]
+    restart: unless-stopped
+    network_mode: host
+    tty: true
+    stop_signal: SIGINT
+    environment:
+      TZ: "Europe/Berlin"
+      ZWAVE_PORT: "/dev/zwave"
+      SESSION_SECRET: "${ZWAVE_SESSION_SECRET:-smarthomeboard-local-zwave}"
+    devices:
+      # Auf dem Docker-Host zuerst `ls -l /dev/serial/by-id/` ausführen und
+      # ZWAVE_DEVICE in .env auf den stabilen Pfad des Z-Wave-Sticks setzen.
+      - ${ZWAVE_DEVICE:-/dev/serial/by-id/ZWAVE_STICK_PFAD_EINTRAGEN}:/dev/zwave
+    volumes:
+      - ./zwave-store:/usr/src/app/store

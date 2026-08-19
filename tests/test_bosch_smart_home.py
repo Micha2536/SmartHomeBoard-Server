@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,14 +65,16 @@ class FakeService:
 
 
 class FakeSession:
-    def __init__(self, device):
+    def __init__(self, device, devices=None):
         self._device = device
+        self.devices = devices or [device]
+        self.scenarios = []
 
     def room(self, room_id):
         return SimpleNamespace(name="Wohnzimmer")
 
     def device(self, device_id):
-        return self._device
+        return next((device for device in self.devices if str(device.id) == str(device_id)), self._device)
 
 
 class BoschSmartHomeModuleTests(unittest.IsolatedAsyncioTestCase):
@@ -126,6 +129,62 @@ class BoschSmartHomeModuleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([("switchState", "ON")], switch.writes)
         self.assertEqual(1, self.context.published[-1]["attributes"][0]["current_value"])
 
+    def test_room_climate_control_and_thermostat_are_one_logical_device(self):
+        climate = SimpleNamespace(
+            id="roomClimateControl_room-1", name="Room Climate Control", room_id="room-1",
+            device_model="RoomClimateControl", status="AVAILABLE", device_services=[
+                FakeService("RoomClimateControl", {
+                    "setpointTemperature": 21.0,
+                    "boostMode": True,
+                    "summerMode": False,
+                    "operationMode": "AUTOMATIC",
+                })
+            ],
+        )
+        thermostat = SimpleNamespace(
+            id="thermostat-1", name="Raumthermostat", room_id="room-1",
+            device_model="Room Thermostat", status="AVAILABLE", device_services=[
+                FakeService("TemperatureLevel", {"temperature": 20.4}),
+                FakeService("HumidityLevel", {"humidity": 48.0}),
+            ],
+        )
+        self.adapter.session = FakeSession(climate, [climate, thermostat])
+
+        groups = self.adapter._logical_device_groups(self.adapter.session.devices)
+        self.assertEqual(1, len(groups))
+        external_id, devices = groups[0]
+        self.assertEqual("device:thermostat-1", external_id)
+        self.assertEqual({"roomClimateControl_room-1", "thermostat-1"}, {item.id for item in devices})
+
+        node = self.adapter._node(devices, external_id)
+        attributes = {item["name"]: item for item in node["attributes"]}
+        self.assertEqual("Wohnzimmer Heizung", node["name"])
+        self.assertEqual(20.4, attributes["Temperatur"]["current_value"])
+        self.assertEqual(48.0, attributes["Luftfeuchtigkeit"]["current_value"])
+        self.assertEqual(21.0, attributes["Solltemperatur"]["current_value"])
+        self.assertEqual(1, attributes["Boost"]["current_value"])
+        self.assertEqual(0, attributes["Sommermodus"]["current_value"])
+        self.assertEqual("choice", attributes["Betriebsmodus"]["unit"])
+        self.assertEqual("Automatisch", json.loads(attributes["Betriebsmodus"]["data"])["label"])
+        self.assertTrue(attributes["Solltemperatur"]["editable"])
+        self.assertTrue(attributes["Betriebsmodus"]["editable"])
+        self.assertTrue(attributes["Boost"]["editable"])
+        self.assertTrue(attributes["Sommermodus"]["editable"])
+
+    def test_temperature_sensor_without_thermostat_hint_is_not_merged(self):
+        climate = SimpleNamespace(
+            id="roomClimateControl_room-1", name="Klima", room_id="room-1",
+            device_model="RoomClimateControl", status="AVAILABLE",
+            device_services=[FakeService("RoomClimateControl", {"setpointTemperature": 20.0})],
+        )
+        air_sensor = SimpleNamespace(
+            id="sensor-1", name="Universalsensor", room_id="room-1", device_model="Sensor",
+            status="AVAILABLE", device_services=[FakeService("TemperatureLevel", {"temperature": 19.0})],
+        )
+
+        groups = self.adapter._logical_device_groups([climate, air_sensor])
+        self.assertEqual(2, len(groups))
+
     def test_text_states_use_data_for_readable_dashboards_and_epaper(self):
         descriptor = MODULE._descriptor("ShutterContact", "value", "OPEN")
         current, data = MODULE._display_value("OPEN", descriptor)
@@ -137,6 +196,14 @@ class BoschSmartHomeModuleTests(unittest.IsolatedAsyncioTestCase):
         descriptor = MODULE._descriptor("ShutterControl", "level", 0.42)
         self.assertEqual((42.0, None), MODULE._display_value(0.42, descriptor))
         self.assertEqual(0.75, MODULE._control_value("fraction_percent", 75))
+
+    def test_operation_mode_is_a_writable_translated_choice(self):
+        descriptor = MODULE._descriptor("RoomClimateControl", "operationMode", "AUTOMATIC")
+        current, data = MODULE._display_value("AUTOMATIC", descriptor)
+        self.assertEqual(0, current)
+        self.assertEqual("Automatisch", json.loads(data)["label"])
+        self.assertEqual("AUTOMATIC", MODULE._control_value("operation_mode", 0))
+        self.assertEqual("MANUAL", MODULE._control_value("operation_mode", 1))
 
     async def test_unpaired_start_stays_available_for_pair_action(self):
         await self.adapter.start()

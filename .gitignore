@@ -2,3 +2,6 @@ data/
 __pycache__/
 *.pyc
 .DS_Store
+zwave-store/
+secrets/
+.env

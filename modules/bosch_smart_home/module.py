@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
 import re
 import tempfile
@@ -16,7 +17,7 @@ def manifest():
     return {
         "id": "bosch-smart-home",
         "name": "Bosch Smart Home",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "icon": "house.and.flag",
         "description": (
             "Lokale Verbindung zum Bosch Smart Home Controller über die offizielle REST API. "
@@ -63,12 +64,14 @@ class BoschSmartHomeAdapter:
         self.subscribed_services = set()
         self.controls = {}
         self.connect_lock = None
+        self.publish_lock = None
         self.maintenance_task = None
         self.startup_status = "Verbunden"
 
     async def start(self):
         self.loop = asyncio.get_running_loop()
         self.connect_lock = asyncio.Lock()
+        self.publish_lock = asyncio.Lock()
         if not self._has_credentials():
             self.startup_status = "Kopplung erforderlich"
             await self.context.set_status("Kopplung erforderlich")
@@ -112,8 +115,7 @@ class BoschSmartHomeAdapter:
         converted = _control_value(conversion, value)
         await asyncio.to_thread(service.put_state_element, key, converted)
         await asyncio.to_thread(service.short_poll)
-        device = self.session.device(service.device_id)
-        await self._publish_device(device)
+        await self._publish_device_id(service.device_id)
 
     async def _pair(self):
         self._require_library()
@@ -217,24 +219,70 @@ class BoschSmartHomeAdapter:
             known_devices = current_devices
 
     async def _publish_device_id(self, device_id):
-        if self.session:
-            with contextlib.suppress(KeyError):
-                await self._publish_device(self.session.device(device_id))
+        if not self.session:
+            return
+        groups = self._logical_device_groups(list(self.session.devices))
+        match = next((item for item in groups if any(str(device.id) == str(device_id) for device in item[1])), None)
+        if not match:
+            return
+        if not self.publish_lock:
+            self.publish_lock = asyncio.Lock()
+        async with self.publish_lock:
+            await self._publish_device(match[1], match[0])
 
     async def _publish_all(self):
-        active_node_ids = set()
-        for device in list(self.session.devices):
-            active_node_ids.add(await self._publish_device(device))
-        for scenario in list(self.session.scenarios):
-            active_node_ids.add(await self._publish_scenario(scenario))
-        for node in self.context.nodes():
-            if int(node.get("id", -1)) not in active_node_ids:
-                await self.context.remove_node(int(node["id"]))
+        if not self.publish_lock:
+            self.publish_lock = asyncio.Lock()
+        async with self.publish_lock:
+            self.controls.clear()
+            active_node_ids = set()
+            for external_id, devices in self._logical_device_groups(list(self.session.devices)):
+                active_node_ids.add(await self._publish_device(devices, external_id))
+            for scenario in list(self.session.scenarios):
+                active_node_ids.add(await self._publish_scenario(scenario))
+            for node in self.context.nodes():
+                if int(node.get("id", -1)) not in active_node_ids:
+                    await self.context.remove_node(int(node["id"]))
 
-    async def _publish_device(self, device):
-        node = self._node(device)
+    async def _publish_device(self, devices, external_id=None):
+        if not isinstance(devices, (list, tuple)):
+            devices = [devices]
+        external_id = external_id or ("device:" + str(devices[0].id))
+        node_id = self.context.stable_node_id(external_id)
+        self.controls = {key: value for key, value in self.controls.items() if key[0] != node_id}
+        node = self._node(devices, external_id)
         await self.context.publish_node(node)
         return node["id"]
+
+    def _logical_device_groups(self, devices):
+        """Combines Bosch' virtual room controller with the thermostats in that room."""
+        ordered = sorted(devices, key=lambda item: str(item.id))
+        climate_by_room = {}
+        thermostats_by_room = {}
+        for device in ordered:
+            room_id = str(getattr(device, "room_id", "") or "")
+            if not room_id:
+                continue
+            if _is_room_climate_control(device):
+                climate_by_room.setdefault(room_id, []).append(device)
+            elif _is_heating_thermostat(device):
+                thermostats_by_room.setdefault(room_id, []).append(device)
+
+        consumed = set()
+        groups = []
+        for room_id in sorted(climate_by_room):
+            climate_devices = climate_by_room[room_id]
+            thermostat_devices = thermostats_by_room.get(room_id, [])
+            merged = climate_devices + thermostat_devices
+            consumed.update(str(item.id) for item in merged)
+            # Keep the existing physical thermostat node id so dashboard references survive the merge.
+            identity_device = thermostat_devices[0] if thermostat_devices else climate_devices[0]
+            groups.append(("device:" + str(identity_device.id), merged))
+
+        for device in ordered:
+            if str(device.id) not in consumed:
+                groups.append(("device:" + str(device.id), [device]))
+        return groups
 
     async def _publish_scenario(self, scenario):
         node_id = self.context.stable_node_id("scenario:" + str(scenario.id))
@@ -253,42 +301,53 @@ class BoschSmartHomeAdapter:
         })
         return node_id
 
-    def _node(self, device):
-        node_id = self.context.stable_node_id("device:" + str(device.id))
+    def _node(self, devices, external_id=None):
+        if not isinstance(devices, (list, tuple)):
+            devices = [devices]
+        device = devices[0]
+        external_id = external_id or ("device:" + str(device.id))
+        node_id = self.context.stable_node_id(external_id)
         now = time.time()
         attributes = []
+        attribute_keys = set()
         room = ""
         with contextlib.suppress(Exception):
             room = self.session.room(device.room_id).name if device.room_id else ""
-        for service in sorted(device.device_services, key=lambda item: str(item.id)):
-            state = service.state if isinstance(service.state, dict) else {}
-            for key, value in sorted(state.items()):
-                if key.startswith("@") or isinstance(value, (dict, list)) or value is None:
-                    continue
-                descriptor = _descriptor(str(service.id), key, value)
-                offset = _attribute_offset(str(service.id), key)
-                attribute_id = self.context.attribute_id(node_id, offset)
-                converted, data = _display_value(value, descriptor)
-                item = {
-                    "id": attribute_id, "node_id": node_id, "type": descriptor[1],
-                    "name": descriptor[0], "unit": descriptor[2], "current_value": converted,
-                    "editable": bool(descriptor[3]), "last_changed": now,
-                }
-                if data is not None:
-                    item["data"] = data
-                if descriptor[3]:
-                    item.update({
-                        "target_value": converted, "minimum": descriptor[4],
-                        "maximum": descriptor[5], "step_value": descriptor[6],
-                    })
-                    self.controls[(node_id, attribute_id)] = (service, key, descriptor[7])
-                attributes.append(item)
-        status = str(getattr(device, "status", "AVAILABLE"))
+        for source_device in devices:
+            for service in sorted(source_device.device_services, key=lambda item: str(item.id)):
+                state = service.state if isinstance(service.state, dict) else {}
+                for key, value in sorted(state.items()):
+                    service_key = (str(service.id), key)
+                    if service_key in attribute_keys or key.startswith("@") or isinstance(value, (dict, list)) or value is None:
+                        continue
+                    attribute_keys.add(service_key)
+                    descriptor = _descriptor(str(service.id), key, value)
+                    offset = _attribute_offset(str(service.id), key)
+                    attribute_id = self.context.attribute_id(node_id, offset)
+                    converted, data = _display_value(value, descriptor)
+                    item = {
+                        "id": attribute_id, "node_id": node_id, "type": descriptor[1],
+                        "name": descriptor[0], "unit": descriptor[2], "current_value": converted,
+                        "editable": bool(descriptor[3]), "last_changed": now,
+                    }
+                    if data is not None:
+                        item["data"] = data
+                    if descriptor[3]:
+                        item.update({
+                            "target_value": converted, "minimum": descriptor[4],
+                            "maximum": descriptor[5], "step_value": descriptor[6],
+                        })
+                        self.controls[(node_id, attribute_id)] = (service, key, descriptor[7])
+                    attributes.append(item)
+        statuses = {str(getattr(item, "status", "AVAILABLE")) for item in devices}
+        models = list(dict.fromkeys(str(item.device_model or "") for item in devices if item.device_model))
+        merged_climate = len(devices) > 1 and any(_is_room_climate_control(item) for item in devices)
+        name = f"{room} Heizung" if merged_climate and room else str(device.name)
         return {
-            "id": node_id, "integration_source": "server", "name": str(device.name),
-            "note": " · ".join(filter(None, ["Server", "Bosch Smart Home", room, str(device.device_model or "")])),
-            "state": 1 if status in ("AVAILABLE", "ONLINE", "ENABLED") else 2,
-            "profile": 0, "protocol": 21, "image": _device_image(device),
+            "id": node_id, "integration_source": "server", "name": name,
+            "note": " · ".join(filter(None, ["Server", "Bosch Smart Home", room, ", ".join(models)])),
+            "state": 1 if statuses & {"AVAILABLE", "ONLINE", "ENABLED"} else 2,
+            "profile": 0, "protocol": 21, "image": _device_image(devices),
             "state_changed": now, "attributes": attributes,
         }
 
@@ -316,7 +375,7 @@ _DESCRIPTORS = {
     ("TemperatureLevel", "temperature"): ("Temperatur", 5, "°C", False, 0, 0, 0, None),
     ("HumidityLevel", "humidity"): ("Luftfeuchtigkeit", 7, "%", False, 0, 0, 0, None),
     ("RoomClimateControl", "setpointTemperature"): ("Solltemperatur", 6, "°C", True, 5, 30, 0.5, "number"),
-    ("RoomClimateControl", "operationMode"): ("Betriebsmodus", 45, "text", False, 0, 0, 0, None),
+    ("RoomClimateControl", "operationMode"): ("Betriebsmodus", 45, "choice", True, 0, 1, 1, "operation_mode"),
     ("RoomClimateControl", "boostMode"): ("Boost", 1, "", True, 0, 1, 1, "bool"),
     ("RoomClimateControl", "summerMode"): ("Sommermodus", 1, "", True, 0, 1, 1, "bool"),
     ("ShutterContact", "value"): ("Fenster/Tür", 10, "text", False, 0, 0, 0, None),
@@ -361,6 +420,16 @@ def _descriptor(service, key, value):
 
 
 def _display_value(value, descriptor):
+    if descriptor[7] == "operation_mode":
+        selected = 0 if str(value).upper() == "AUTOMATIC" else 1
+        label = "Automatisch" if selected == 0 else "Manuell"
+        return selected, json.dumps({
+            "label": label,
+            "options": [
+                {"value": 0, "label": "Automatisch"},
+                {"value": 1, "label": "Manuell"},
+            ],
+        }, ensure_ascii=False, separators=(",", ":"))
     if isinstance(value, bool):
         return (1 if value else 0), None
     if isinstance(value, (int, float)):
@@ -384,6 +453,8 @@ def _control_value(conversion, value):
         return "ENABLED" if active else "DISABLED"
     if conversion == "fraction_percent":
         return max(0.0, min(1.0, float(value) / 100.0))
+    if conversion == "operation_mode":
+        return "AUTOMATIC" if float(value) < 0.5 else "MANUAL"
     return float(value)
 
 
@@ -391,8 +462,31 @@ def _attribute_offset(service, key):
     return 100 + int.from_bytes(hashlib.sha256(f"{service}:{key}".encode()).digest()[:4], "big") % 900_000
 
 
-def _device_image(device):
-    services = {str(item.id) for item in device.device_services}
+def _service_ids(device):
+    return {str(item.id) for item in getattr(device, "device_services", [])}
+
+
+def _is_room_climate_control(device):
+    return "RoomClimateControl" in _service_ids(device) or str(getattr(device, "id", "")).startswith("roomClimateControl_")
+
+
+def _is_heating_thermostat(device):
+    services = _service_ids(device)
+    if not services & {"TemperatureLevel", "HumidityLevel"}:
+        return False
+    if services & {"Thermostat", "ValveTappet", "TemperatureOffset", "SilentMode"}:
+        return True
+    model = str(getattr(device, "device_model", "")).upper()
+    if model in {"TRV", "TRV_GEN2", "TRV_GEN2_DUAL", "THB", "BWTH", "BWTH24", "RTH2_BAT", "RTH2_230"}:
+        return True
+    hint = " ".join([str(getattr(device, "name", "")), model]).lower()
+    return any(token in hint for token in ("thermostat", "radiator", "trv", "heizkörper"))
+
+
+def _device_image(devices):
+    if not isinstance(devices, (list, tuple)):
+        devices = [devices]
+    services = set().union(*(_service_ids(device) for device in devices))
     if "ShutterContact" in services:
         return "door.left.hand.open"
     if "RoomClimateControl" in services or "TemperatureLevel" in services:

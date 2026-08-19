@@ -23,8 +23,10 @@ class AutomationEngine:
         self.condition_states = {}
         self.action_tasks = {}
         self.timer_task = None
+        self.push_service = None
 
     async def start(self):
+        self.refresh_from_database()
         self.timer_task = asyncio.create_task(self._timer())
 
     async def stop(self):
@@ -39,8 +41,39 @@ class AutomationEngine:
         self.server_owned_ids.intersection_update(str(rule.get("id", "")) for rule in rules)
         self._persist_rules("Automationen vollständig ersetzt")
 
+    def refresh_from_database(self):
+        """Synchronize rule state shared by the API and setup processes.
+
+        The setup portal and the app API intentionally run in separate uvicorn
+        processes. SQLite is the source of truth; only changed rules cancel
+        their pending actions in the executing API process.
+        """
+        stored_synced_at = self.runtime.database.setting("automations_synced_at", None)
+        if stored_synced_at != self.synced_at:
+            stored_rules = self.runtime.database.setting("automations", []) or []
+            previous = {str(item.get("id", "")): item for item in self.rules}
+            current = {str(item.get("id", "")): item for item in stored_rules}
+            changed_ids = {
+                rule_id for rule_id in set(previous) | set(current)
+                if previous.get(rule_id) != current.get(rule_id)
+            }
+            for rule_id in changed_ids:
+                self._cancel_rule_tasks(rule_id)
+            self.rules = stored_rules
+            self.server_owned_ids = set(self.runtime.database.setting("automation_server_owned_ids", []) or [])
+            self.deleted_ids = set(self.runtime.database.setting("automation_deleted_ids", []) or [])
+            self.synced_at = stored_synced_at
+            valid_ids = set(current)
+            self.condition_states = {
+                key: value for key, value in self.condition_states.items()
+                if str(key).split(":", 1)[0] in valid_ids
+            }
+        self.last_triggered = self.runtime.database.setting("automation_last_triggered", {}) or {}
+        self.events = (self.runtime.database.setting("automation_events", []) or [])[-50:]
+
     def replace_from_app(self, rules):
         """Synchronize app-owned rules without overwriting web-owned rules."""
+        self.refresh_from_database()
         preserved = [rule for rule in self.rules if str(rule.get("id", "")) in self.server_owned_ids]
         incoming = [
             rule for rule in rules
@@ -51,6 +84,7 @@ class AutomationEngine:
         self._persist_rules(f"{len(incoming)} App-Automationen synchronisiert; {len(preserved)} Serverregeln beibehalten")
 
     def upsert_server(self, rule):
+        self.refresh_from_database()
         rule_id = str(rule.get("id", ""))
         previous = next((item for item in self.rules if str(item.get("id", "")) == rule_id), None)
         self.rules = [item for item in self.rules if str(item.get("id", "")) != rule_id]
@@ -61,6 +95,7 @@ class AutomationEngine:
         self._persist_rules(f"Serverautomation {'aktualisiert' if previous else 'angelegt'}: {rule.get('name', 'Automation')}")
 
     def delete_server(self, rule_id):
+        self.refresh_from_database()
         rule_id = str(rule_id)
         previous = next((item for item in self.rules if str(item.get("id", "")) == rule_id), None)
         if not previous:
@@ -78,19 +113,21 @@ class AutomationEngine:
         for key in [key for key in self.action_tasks if key.startswith(f"{rule_id}:")]:
             self.action_tasks.pop(key).cancel()
 
-    def _persist_rules(self, message):
+    def _persist_rules(self, message, cancel_tasks=True):
         self.synced_at = time.time()
         self.runtime.database.set_setting("automations", self.rules)
         self.runtime.database.set_setting("automations_synced_at", self.synced_at)
         self.runtime.database.set_setting("automation_server_owned_ids", sorted(self.server_owned_ids))
         self.runtime.database.set_setting("automation_deleted_ids", sorted(self.deleted_ids))
-        for task in self.action_tasks.values():
-            task.cancel()
-        self.action_tasks.clear()
+        if cancel_tasks:
+            for task in self.action_tasks.values():
+                task.cancel()
+            self.action_tasks.clear()
         self._record(None, "info", message)
 
     def status(self):
-        return {
+        self.refresh_from_database()
+        result = {
             "count": len(self.rules),
             "synced_at": self.synced_at,
             "automations": [
@@ -103,11 +140,15 @@ class AutomationEngine:
                     "action_count": len(rule.get("actions", [])),
                     "last_triggered_at": self.last_triggered.get(str(rule.get("id", ""))),
                     "origin": "server" if str(rule.get("id", "")) in self.server_owned_ids else "app",
+                    "running": any(key.startswith(f"{rule.get('id')}:") for key in self.action_tasks),
                 }
                 for rule in self.rules
             ],
             "recent_events": list(reversed(self.events[-100:])),
         }
+        if self.push_service:
+            result["push"] = self.push_service.status()
+        return result
 
     def _record(self, rule, level, message):
         event = {
@@ -123,6 +164,7 @@ class AutomationEngine:
         self.runtime.database.set_setting("automation_events", self.events)
 
     async def test(self, rule_id):
+        self.refresh_from_database()
         rule = next((item for item in self.rules if str(item.get("id", "")) == str(rule_id)), None)
         if not rule:
             return {"ok": False, "message": "Automation wurde auf dem Server nicht gefunden."}
@@ -137,7 +179,42 @@ class AutomationEngine:
         )
         return {"ok": ok, "message": message}
 
+    async def control(self, rule_id, operation, event=None, source_rule_id=None):
+        self.refresh_from_database()
+        rule_id = str(rule_id)
+        rule = next((item for item in self.rules if str(item.get("id", "")) == rule_id), None)
+        if not rule:
+            return {"ok": False, "message": "Automation wurde auf dem Server nicht gefunden."}
+        if source_rule_id and rule_id == str(source_rule_id):
+            return {"ok": False, "message": "Eine Automation darf sich nicht selbst steuern."}
+        if operation == "stop":
+            self._cancel_rule_tasks(rule_id)
+            self._record(rule, "info", "Automation und laufende Zeitabläufe gestoppt")
+            return {"ok": True, "message": f"Automation gestoppt: {rule.get('name', 'Automation')}"}
+        if operation in ("enable", "disable"):
+            enabled = operation == "enable"
+            rule["isEnabled"] = enabled
+            if not enabled:
+                self._cancel_rule_tasks(rule_id)
+            self._persist_rules(
+                f"Automation {'aktiviert' if enabled else 'deaktiviert'}: {rule.get('name', 'Automation')}",
+                cancel_tasks=False,
+            )
+            return {"ok": True, "message": f"Automation {'aktiviert' if enabled else 'deaktiviert'}: {rule.get('name', 'Automation')}"}
+        if operation == "play":
+            if not rule.get("isEnabled", True):
+                return {"ok": False, "message": "Die Zielautomation ist deaktiviert."}
+            chain = list((event or {}).get("automation_chain", []))
+            if rule_id in chain or len(chain) >= 10:
+                return {"ok": False, "message": "Zyklischer Automationsaufruf wurde verhindert."}
+            next_event = dict(event or {"device_name": "Automation", "attribute_name": "Play", "value": "Start"})
+            next_event["automation_chain"] = chain + ([str(source_rule_id)] if source_rule_id else []) + [rule_id]
+            ok, message = await self._trigger(rule, next_event, ignore_cooldown=True, source="Andere Automation")
+            return {"ok": ok, "message": message}
+        return {"ok": False, "message": "Unbekannter Automationsbefehl."}
+
     async def node_changed(self, previous, node):
+        self.refresh_from_database()
         old = {a["id"]: a for a in (previous or {}).get("attributes", [])}
         events = []
         for attribute in node.get("attributes", []):
@@ -156,6 +233,7 @@ class AutomationEngine:
 
     async def _timer(self):
         while True:
+            self.refresh_from_database()
             now = dt.datetime.now(self.timezone)
             for rule in self.rules:
                 if not rule.get("isEnabled", True):
@@ -233,6 +311,23 @@ class AutomationEngine:
                     raise ValueError("Dem Roborock fehlt die Server-Integrations-ID")
                 await self.runtime.integration_action(integration_id, "automation_cleaning", action)
                 result = "atomar am Roborock ausgeführt"
+            elif kind == "controlAutomation":
+                target_id = action.get("automationID")
+                control_result = await self.control(
+                    target_id,
+                    action.get("automationOperation", "play"),
+                    event=event,
+                    source_rule_id=rule.get("id"),
+                )
+                if not control_result["ok"]:
+                    raise ValueError(control_result["message"])
+                result = control_result["message"]
+            elif kind == "serverPushNotification":
+                if not self.push_service:
+                    raise ValueError("Der Push-Dienst ist nicht verfügbar")
+                title, message = self._push_text(action, event)
+                sent = await self.push_service.send(title, message, action.get("pushDeviceIDs"))
+                result = f"an {sent} iOS-Gerät(e) gesendet"
             else:
                 await self.runtime.broadcast({"type": "client_action", "action": action, "context": event})
                 result = "an die App weitergeleitet"
@@ -243,7 +338,43 @@ class AutomationEngine:
             self._record(rule, "error", f"Aktion fehlgeschlagen: {error}")
             log.exception("Automation %s konnte nicht ausgeführt werden", rule.get("name"))
         finally:
-            self.action_tasks.pop(key, None)
+            if self.action_tasks.get(key) is asyncio.current_task():
+                self.action_tasks.pop(key, None)
+
+    def _push_text(self, action, event):
+        title = str(action.get("title") or "SmartHomeBoard")
+        message = str(action.get("message") or "Automation wurde ausgeführt.")
+        replacements = {
+            "{device}": str((event or {}).get("device_name", "")),
+            "{deviceName}": str((event or {}).get("device_name", "")),
+            "{attribute}": str((event or {}).get("attribute_name", "")),
+            "{value}": str((event or {}).get("value", "")),
+        }
+        if action.get("includeAttributeValue"):
+            node = self._node(int(action.get("nodeID", 0)))
+            attribute = self._attribute(action)
+            if not node or not attribute:
+                raise ValueError("Das Geräteattribut der Push-Nachricht ist nicht verfügbar")
+            value = attribute.get("current_value")
+            if value is None:
+                value = attribute.get("target_value", "")
+            unit = str(attribute.get("unit") or "").strip()
+            selected_value = f"{value:g}" if isinstance(value, (int, float)) else str(value)
+            if unit:
+                selected_value = f"{selected_value} {unit}"
+            selected = {
+                "{selectedDevice}": str(node.get("name") or f"Gerät {node.get('id')}"),
+                "{selectedAttribute}": str(attribute.get("name") or f"Attribut {attribute.get('id')}"),
+                "{selectedValue}": selected_value,
+            }
+            contains_placeholder = any(token in title or token in message for token in selected)
+            replacements.update(selected)
+            if not contains_placeholder:
+                message = f"{message} · {selected['{selectedDevice}']} – {selected['{selectedAttribute}']}: {selected_value}"
+        for token, value in replacements.items():
+            title = title.replace(token, value)
+            message = message.replace(token, value)
+        return title.strip() or "SmartHomeBoard", message.strip()
 
     def _conditions_match(self, rule):
         return all(self._condition(condition) for condition in rule.get("conditions", []))
