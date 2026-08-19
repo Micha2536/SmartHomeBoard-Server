@@ -14,12 +14,21 @@ SPEC.loader.exec_module(MODULE)
 class FakeContext:
     integration_name = "Meine Roborocks"
 
+    def __init__(self):
+        self.state = {}
+
     def stable_node_id(self, external_id):
         return 1_750_000_001
 
     @staticmethod
     def attribute_id(node_id, offset):
         return node_id * 100 + offset
+
+    def load_state(self, default=None):
+        return self.state or default
+
+    def save_state(self, value):
+        self.state = value
 
 
 class FakeCommand:
@@ -79,6 +88,7 @@ class RoborockModuleTests(unittest.IsolatedAsyncioTestCase):
     async def test_v1_controls_start_pause_and_dock(self):
         command = FakeCommand()
         device = SimpleNamespace(
+            duid="vacuum-1",
             v1_properties=SimpleNamespace(command=command),
             b01_q10_properties=None,
         )
@@ -107,8 +117,11 @@ class RoborockModuleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([
             ("set_custom_mode", [103]),
-            ("app_segment_clean", [[7]]),
+            ("app_segment_clean", [{"segments": [7]}]),
         ], command.commands)
+        self.assertEqual(7, self.adapter.selected_targets["vacuum-1"]["room"])
+        self.assertEqual("room", self.adapter.selected_targets["vacuum-1"]["kind"])
+        self.assertEqual(7, self.context.state["selected_targets"]["vacuum-1"]["room"])
 
     def test_choice_payload_contains_readable_options(self):
         data = MODULE._choice_data(2, [
@@ -117,6 +130,58 @@ class RoborockModuleTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertIn('"label":"Turbo"', data)
         self.assertIn('"value":1', data)
+
+    def test_selected_room_and_routine_are_shown_after_refresh(self):
+        device = SimpleNamespace(
+            duid="vacuum-1", name="Küche", product=SimpleNamespace(model="roborock.vacuum.a70"),
+            is_connected=True, v1_properties=SimpleNamespace(), b01_q10_properties=None,
+        )
+        self.adapter.controls["vacuum-1"] = {
+            "cleaning_types": [], "suction": [], "water": [],
+            "rooms": [{"value": 7, "label": "Küche", "command": 7, "key": "7"}],
+            "routines": [{"value": 9, "label": "Abendrunde", "command": 9, "key": "9"}],
+        }
+        self.adapter.selected_targets["vacuum-1"] = {"room": 7, "routine": 9, "kind": "room"}
+
+        node = self.adapter._node(device, None)
+        attributes = {item["name"]: item for item in node["attributes"]}
+
+        self.assertEqual(7, attributes["Raum auswählen"]["current_value"])
+        self.assertIn('"label":"Küche"', attributes["Raum auswählen"]["data"])
+        self.assertEqual(-1, attributes["Routine auswählen"]["current_value"])
+        self.assertIn('"label":"Gesamte Fläche"', attributes["Routine auswählen"]["data"])
+
+    async def test_selecting_room_does_not_start_until_main_start_command(self):
+        command = FakeCommand()
+        device = SimpleNamespace(
+            duid="vacuum-1", v1_properties=SimpleNamespace(command=command), b01_q10_properties=None,
+        )
+        self.adapter.controls["vacuum-1"] = {
+            "cleaning_types": [], "suction": [], "water": [],
+            "rooms": [{"value": 7, "label": "Küche", "command": 7, "key": "7"}], "routines": [],
+        }
+
+        self.adapter._select_target(device, "room", 7)
+        self.assertEqual([], command.commands)
+
+        await self.adapter._set_cleaning(device, True)
+        self.assertEqual([("app_segment_clean", [{"segments": [7]}])], command.commands)
+
+    async def test_complete_selection_restores_normal_start(self):
+        command = FakeCommand()
+        device = SimpleNamespace(
+            duid="vacuum-1", v1_properties=SimpleNamespace(command=command), b01_q10_properties=None,
+        )
+        self.adapter.selected_targets["vacuum-1"] = {"room": 7, "kind": "room"}
+
+        self.adapter._select_target(device, "room", -1)
+        await self.adapter._set_cleaning(device, True)
+
+        self.assertEqual(["app_start"], command.commands)
+
+    def test_cleaning_type_labels_distinguish_simultaneous_and_sequential_modes(self):
+        self.assertEqual("Saugen und Wischen (gleichzeitig)", MODULE._translate_mode("vac_and_mop"))
+        self.assertEqual("Erst saugen, dann wischen", MODULE._translate_mode("vacuum_then_mop"))
 
     def test_poll_interval_is_bounded(self):
         self.adapter.configuration["poll_seconds"] = 1

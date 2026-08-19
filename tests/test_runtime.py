@@ -109,6 +109,29 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["automations"][0]["id"], "rule")
         self.assertIsNotNone(status["synced_at"])
 
+    async def test_server_owned_automation_survives_app_synchronization(self):
+        engine = AutomationEngine(self.runtime)
+        server_rule = {"id": "server-rule", "name": "Nur Server", "isEnabled": True,
+                       "triggers": [], "conditions": [], "actions": []}
+        app_rule = {"id": "app-rule", "name": "Vom iPad", "isEnabled": True,
+                    "triggers": [], "conditions": [], "actions": []}
+        engine.upsert_server(server_rule)
+        engine.replace_from_app([app_rule])
+
+        self.assertEqual({"server-rule", "app-rule"}, {rule["id"] for rule in engine.rules})
+        origins = {item["id"]: item["origin"] for item in engine.status()["automations"]}
+        self.assertEqual("server", origins["server-rule"])
+        self.assertEqual("app", origins["app-rule"])
+
+    async def test_web_deleted_rule_is_not_recreated_by_next_app_sync(self):
+        engine = AutomationEngine(self.runtime)
+        rule = {"id": "shared-rule", "name": "Geteilt", "isEnabled": True,
+                "triggers": [], "conditions": [], "actions": []}
+        engine.replace_from_app([rule])
+        self.assertTrue(engine.delete_server("shared-rule"))
+        engine.replace_from_app([rule])
+        self.assertEqual([], engine.rules)
+
     async def test_automation_threshold_and_not_equal_trigger_semantics(self):
         engine = AutomationEngine(self.runtime)
         self.assertTrue(engine._trigger_compare(9, 11, 10, "greater"))

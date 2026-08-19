@@ -12,7 +12,7 @@ def manifest():
     return {
         "id": "roborock",
         "name": "Roborock",
-        "version": "1.2.0",
+        "version": "1.2.3",
         "icon": "fan",
         "description": (
             "Dauerhafte Roborock-Cloud-Verbindung mit E-Mail-Code-Anmeldung. "
@@ -82,6 +82,12 @@ class RoborockAdapter:
         self.operation_lock = asyncio.Lock()
         self.startup_status = "Anmeldung erforderlich"
         self.startup_error = None
+        persisted = self.context.load_state({}) or {}
+        self.selected_targets = (
+            dict(persisted.get("selected_targets", {}))
+            if isinstance(persisted, dict) and isinstance(persisted.get("selected_targets", {}), dict)
+            else {}
+        )
 
     async def start(self):
         email = self._email()
@@ -184,7 +190,7 @@ class RoborockAdapter:
                 await asyncio.sleep(0.2)
 
             if target == "complete":
-                await self._set_cleaning(device, True)
+                await self._set_cleaning(device, True, use_selected_target=False)
             elif target == "room":
                 await self._clean_rooms(device, [target_value])
             elif target == "routine":
@@ -216,9 +222,9 @@ class RoborockAdapter:
         elif offset == 12:
             await self._set_water(device, int(round(float(value))))
         elif offset == 13:
-            await self._clean_rooms(device, [int(round(float(value)))])
+            self._select_target(device, "room", int(round(float(value))))
         elif offset == 14:
-            await self._execute_routine(device, int(round(float(value))))
+            self._select_target(device, "routine", int(round(float(value))))
         elif offset == 15:
             if float(value) < 0.5:
                 raise ValueError("Stop kann nur ausgelöst werden")
@@ -348,7 +354,16 @@ class RoborockAdapter:
         self.node_devices[node["id"]] = device
         await self.context.publish_node(node)
 
-    async def _set_cleaning(self, device, enabled):
+    async def _set_cleaning(self, device, enabled, use_selected_target=True):
+        if enabled and use_selected_target:
+            selected = self.selected_targets.get(str(device.duid), {})
+            kind = str(selected.get("kind", "complete"))
+            if kind == "room":
+                await self._clean_rooms(device, [int(selected.get("room", -1))])
+                return
+            if kind == "routine":
+                await self._execute_routine(device, int(selected.get("routine", -1)))
+                return
         if device.v1_properties:
             command = "app_start" if enabled else "app_pause"
             await device.v1_properties.command.send(command)
@@ -448,12 +463,15 @@ class RoborockAdapter:
         if not selected:
             raise ValueError("Der ausgewählte Raum ist nicht mehr verfügbar")
         if device.v1_properties:
-            await device.v1_properties.command.send("app_segment_clean", [selected])
-            return
-        if device.b01_q10_properties:
+            # python-roborock 6.x erwartet für APP_SEGMENT_CLEAN ein Objekt
+            # innerhalb der Parameterliste. Das frühere [[segment_id]] wird
+            # von aktuellen Geräten teilweise ohne Fehlerantwort verworfen.
+            await device.v1_properties.command.send("app_segment_clean", [{"segments": selected}])
+        elif device.b01_q10_properties:
             await device.b01_q10_properties.vacuum.clean_segments(selected)
-            return
-        raise ValueError("Dieses Roborock-Modell unterstützt Raumreinigung noch nicht")
+        else:
+            raise ValueError("Dieses Roborock-Modell unterstützt Raumreinigung noch nicht")
+        self._remember_target(device, "room", selected[0])
 
     async def _execute_routine(self, device, routine_id):
         available = {int(item["value"]) for item in self._control(device).get("routines", [])}
@@ -462,6 +480,7 @@ class RoborockAdapter:
         if not device.v1_properties:
             raise ValueError("Routinen werden von diesem Roborock-Protokoll noch nicht unterstützt")
         await device.v1_properties.routines.execute_routine(routine_id)
+        self._remember_target(device, "routine", routine_id)
 
     async def _discover_controls(self, device):
         control = {"cleaning_types": [], "suction": [], "water": [], "rooms": [], "routines": []}
@@ -595,18 +614,22 @@ class RoborockAdapter:
                 maximum=max(item["value"] for item in control["water"]), step=1,
             ))
         if control.get("rooms"):
+            room_options = [_choice(-1, "Gesamte Fläche", -1, "complete"), *control["rooms"]]
+            selected_room = self._selected_target(device, "room", room_options)
             attributes.append(attr(
-                13, 213, "Raum reinigen", -1, "choice", True,
-                data=_choice_data(-1, control["rooms"], "Raum auswählen"),
-                minimum=min(item["value"] for item in control["rooms"]),
-                maximum=max(item["value"] for item in control["rooms"]), step=1,
+                13, 213, "Raum auswählen", selected_room, "choice", True,
+                data=_choice_data(selected_room, room_options, "Gesamte Fläche"),
+                minimum=min(item["value"] for item in room_options),
+                maximum=max(item["value"] for item in room_options), step=1,
             ))
         if control.get("routines"):
+            routine_options = [_choice(-1, "Gesamte Fläche", -1, "complete"), *control["routines"]]
+            selected_routine = self._selected_target(device, "routine", routine_options)
             attributes.append(attr(
-                14, 213, "Routine starten", -1, "choice", True,
-                data=_choice_data(-1, control["routines"], "Routine auswählen"),
-                minimum=min(item["value"] for item in control["routines"]),
-                maximum=max(item["value"] for item in control["routines"]), step=1,
+                14, 213, "Routine auswählen", selected_routine, "choice", True,
+                data=_choice_data(selected_routine, routine_options, "Gesamte Fläche"),
+                minimum=min(item["value"] for item in routine_options),
+                maximum=max(item["value"] for item in routine_options), step=1,
             ))
         attributes.extend([
             attr(15, 1, "Reinigung stoppen", 0, editable=True, minimum=0, maximum=1, step=1),
@@ -647,6 +670,34 @@ class RoborockAdapter:
             return max(15, min(3600, int(float(self.configuration.get("poll_seconds", 30)))))
         except (TypeError, ValueError):
             return 30
+
+    def _remember_target(self, device, kind, value):
+        device_key = str(device.duid)
+        current = dict(self.selected_targets.get(device_key, {}))
+        current[kind] = int(value)
+        current["kind"] = kind
+        self.selected_targets[device_key] = current
+        self.context.save_state({"selected_targets": self.selected_targets})
+
+    def _select_target(self, device, kind, value):
+        if int(value) == -1:
+            device_key = str(device.duid)
+            current = dict(self.selected_targets.get(device_key, {}))
+            current["kind"] = "complete"
+            self.selected_targets[device_key] = current
+            self.context.save_state({"selected_targets": self.selected_targets})
+            return
+        options = self._control(device).get("rooms" if kind == "room" else "routines", [])
+        if not _option_by_value(options, value):
+            raise ValueError("Der ausgewählte Raum beziehungsweise die Routine ist nicht mehr verfügbar")
+        self._remember_target(device, kind, value)
+
+    def _selected_target(self, device, kind, options):
+        target = self.selected_targets.get(str(device.duid), {})
+        if target.get("kind", "complete") != kind:
+            return -1
+        selected = target.get(kind, -1)
+        return int(selected) if _option_by_value(options, selected) else -1
 
     @staticmethod
     def _session_matches(session, email):
@@ -769,7 +820,10 @@ def _translate_mode(value):
         "high": "Hoch", "gentle": "Sanft", "mild": "Niedrig", "standard": "Standard",
         "intense": "Intensiv", "extreme": "Extrem", "fast": "Schnell", "deep": "Gründlich",
         "deep_plus": "Sehr gründlich", "smart_mode": "Smart", "custom": "Benutzerdefiniert",
-        "custom_water_flow": "Eigener Wasserfluss", "vac_and_mop": "Saugen und Wischen", "vacuum": "Saugen",
+        "custom_water_flow": "Eigener Wasserfluss", "vac_and_mop": "Saugen und Wischen (gleichzeitig)", "vacuum": "Saugen",
+        "vac_then_mop": "Erst saugen, dann wischen", "vacuum_then_mop": "Erst saugen, dann wischen",
+        "vacuum_and_then_mop": "Erst saugen, dann wischen", "sweep_then_mop": "Erst saugen, dann wischen",
+        "sweep_and_then_mop": "Erst saugen, dann wischen",
         "mop": "Wischen", "customized": "Benutzerdefiniert", "slight": "Sehr niedrig", "moderate": "Erhöht",
     }
     normalized = str(value).strip().lower()

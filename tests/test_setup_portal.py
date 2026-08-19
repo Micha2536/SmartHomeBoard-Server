@@ -1,6 +1,6 @@
 import unittest
 
-from server.setup_portal import _pretty_protocol_message, displays_page, integrations_page
+from server.setup_portal import _pretty_protocol_message, automations_page, displays_page, integrations_page
 
 
 class SetupPortalTests(unittest.TestCase):
@@ -94,6 +94,32 @@ class SetupPortalTests(unittest.TestCase):
         self.assertIn("select.replaceChildren", html)
         self.assertIn("option.dataset.deviceSearch", html)
         self.assertNotIn("option.hidden", html)
+
+    def test_automation_page_contains_persistent_no_code_editor(self):
+        nodes = [{
+            "id": 11, "name": "Lokales Licht", "integration_module": "demo",
+            "attributes": [{"id": 101, "name": "Schalter", "editable": True, "minimum": 0, "maximum": 1}],
+        }]
+        rule = {
+            "id": "server-rule", "name": "Abendlicht", "isEnabled": True,
+            "cooldownSeconds": 30, "conditionValidation": "triggerTime",
+            "triggers": [{"id": "trigger", "kind": "timeDaily", "minuteOfDay": 1110}],
+            "conditions": [],
+            "actions": [{"id": "action", "kind": "toggleAttribute", "nodeID": 11, "attributeID": 101}],
+        }
+        status = {"count": 1, "automations": [{
+            "id": "server-rule", "name": "Abendlicht", "enabled": True, "origin": "server",
+            "trigger_count": 1, "condition_count": 0, "action_count": 1,
+        }], "recent_events": []}
+
+        html = automations_page("0.14.0", status, nodes=nodes, rules=[rule], selected_id="server-rule")
+
+        self.assertIn("Automation bearbeiten", html)
+        self.assertIn("Automation persistent speichern", html)
+        self.assertIn("UND-Bedingungen", html)
+        self.assertIn("Roborock reinigen", html)
+        self.assertIn("Lokales Licht", html)
+        self.assertIn('action="/setup/automations/delete"', html)
 
 
 if __name__ == "__main__":

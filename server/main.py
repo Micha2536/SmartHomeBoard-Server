@@ -9,6 +9,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import hmac
+import math
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -41,7 +42,7 @@ from .setup_portal import (
 )
 
 logging.basicConfig(level=os.getenv("SHB_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-VERSION = "0.12.0"
+VERSION = "0.14.0"
 SETUP_SESSION_COOKIE = "shb_setup_session"
 ENV_API_TOKEN = os.getenv("SHB_API_TOKEN", "").strip()
 database = Database(os.getenv("SHB_DATA_DIR", "/data"))
@@ -415,7 +416,11 @@ async def delete_setup_display(request: Request):
 
 @setup_app.get("/setup/automations", response_class=HTMLResponse, include_in_schema=False)
 async def setup_automations_page(request: Request):
-    return portal_automations(VERSION, automation_engine.status(), authenticated=setup_session_authenticated(request), token_required=bool(effective_api_token()))
+    return portal_automations(
+        VERSION, automation_engine.status(), nodes=database.nodes(), rules=automation_engine.rules,
+        selected_id=request.query_params.get("edit", ""),
+        authenticated=setup_session_authenticated(request), token_required=bool(effective_api_token()),
+    )
 
 
 @setup_app.post("/setup", response_class=HTMLResponse, include_in_schema=False)
@@ -497,11 +502,56 @@ async def test_automation_from_setup(request: Request):
     token = effective_api_token()
     authenticated = setup_credentials_valid(request, current_token)
     if token and not authenticated:
-        return setup_response(portal_automations(VERSION, automation_engine.status(), error="Der API-Schlüssel für den Automationstest ist nicht korrekt.", token_required=True), status_code=403)
+        return setup_response(portal_automations(VERSION, automation_engine.status(), nodes=database.nodes(), rules=automation_engine.rules, error="Der API-Schlüssel für den Automationstest ist nicht korrekt.", token_required=True), status_code=403)
     result = await automation_engine.test(rule_id)
     if not result["ok"]:
-        return setup_response(portal_automations(VERSION, automation_engine.status(), error=result["message"], authenticated=authenticated, token_required=bool(effective_api_token())), status_code=409, authenticate=authenticated)
-    return setup_response(portal_automations(VERSION, automation_engine.status(), message=result["message"], authenticated=True, token_required=bool(effective_api_token())), authenticate=True)
+        return setup_response(portal_automations(VERSION, automation_engine.status(), nodes=database.nodes(), rules=automation_engine.rules, error=result["message"], authenticated=authenticated, token_required=bool(effective_api_token())), status_code=409, authenticate=authenticated)
+    return setup_response(portal_automations(VERSION, automation_engine.status(), nodes=database.nodes(), rules=automation_engine.rules, message=result["message"], authenticated=True, token_required=bool(effective_api_token())), authenticate=True)
+
+
+@setup_app.post("/setup/automations/save", response_class=HTMLResponse, include_in_schema=False)
+async def save_automation_from_setup(request: Request):
+    values = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+    authenticated = setup_credentials_valid(request, _form_value(values, "current_token"))
+    if effective_api_token() and not authenticated:
+        return setup_response(
+            portal_automations(VERSION, automation_engine.status(), nodes=database.nodes(), rules=automation_engine.rules,
+                               error="Der API-Schlüssel ist nicht korrekt.", token_required=True),
+            status_code=403,
+        )
+    try:
+        rule = validate_web_automation(json.loads(_form_value(values, "rule_json")), database.nodes())
+        automation_engine.upsert_server(rule)
+    except (json.JSONDecodeError, TypeError, ValueError) as action_error:
+        return setup_response(
+            portal_automations(VERSION, automation_engine.status(), nodes=database.nodes(), rules=automation_engine.rules,
+                               error=str(action_error), authenticated=True,
+                               token_required=bool(effective_api_token())),
+            status_code=400, authenticate=True,
+        )
+    return setup_response(
+        portal_automations(VERSION, automation_engine.status(), nodes=database.nodes(), rules=automation_engine.rules, selected_id=rule["id"],
+                           message="Die Automation wurde persistent auf dem Server gespeichert.", authenticated=True,
+                           token_required=bool(effective_api_token())),
+        authenticate=True,
+    )
+
+
+@setup_app.post("/setup/automations/delete", response_class=HTMLResponse, include_in_schema=False)
+async def delete_automation_from_setup(request: Request):
+    values = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+    authenticated = setup_credentials_valid(request, _form_value(values, "current_token"))
+    if effective_api_token() and not authenticated:
+        return setup_response(portal_automations(VERSION, automation_engine.status(), nodes=database.nodes(), rules=automation_engine.rules,
+                              error="Der API-Schlüssel ist nicht korrekt.", token_required=True), status_code=403)
+    rule_id = _form_value(values, "rule_id")
+    if not automation_engine.delete_server(rule_id):
+        return setup_response(portal_automations(VERSION, automation_engine.status(), nodes=database.nodes(), rules=automation_engine.rules,
+                              error="Die Automation wurde nicht gefunden.", authenticated=True,
+                              token_required=bool(effective_api_token())), status_code=404, authenticate=True)
+    return setup_response(portal_automations(VERSION, automation_engine.status(), nodes=database.nodes(), rules=automation_engine.rules,
+                          message="Die Automation wurde gelöscht.", authenticated=True,
+                          token_required=bool(effective_api_token())), authenticate=True)
 
 
 @setup_app.post("/setup/displays/pair", response_class=HTMLResponse, include_in_schema=False)
@@ -631,6 +681,140 @@ def _integration_configuration(values, manifest, previous):
             raise ValueError(f"{field.get('title', key)} darf höchstens {field['maximum']} sein")
         result[key] = value
     return result
+
+
+def validate_web_automation(source, nodes):
+    """Validate and normalize the no-code automation editor payload."""
+    if not isinstance(source, dict):
+        raise ValueError("Die Automation ist kein gültiges JSON-Objekt")
+    rule_id = str(source.get("id") or uuid.uuid4()).strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,80}", rule_id):
+        raise ValueError("Die Automations-ID ist ungültig")
+    name = str(source.get("name", "")).strip()
+    if not name:
+        raise ValueError("Der Name der Automation fehlt")
+    node_map = {int(node.get("id", 0)): node for node in nodes}
+    triggers = [
+        _validate_web_condition(item, node_map, trigger=True)
+        for item in source.get("triggers", [])
+    ]
+    conditions = [
+        _validate_web_condition(item, node_map, trigger=False)
+        for item in source.get("conditions", [])
+    ]
+    actions = [_validate_web_action(item, node_map) for item in source.get("actions", [])]
+    if not triggers:
+        raise ValueError("Mindestens ein Auslöser ist erforderlich")
+    if not actions:
+        raise ValueError("Mindestens eine Aktion ist erforderlich")
+    validation = str(source.get("conditionValidation", "triggerTime"))
+    if validation not in ("triggerTime", "executionTime", "both"):
+        validation = "triggerTime"
+    return {
+        "id": rule_id,
+        "name": name[:120],
+        "isEnabled": bool(source.get("isEnabled", True)),
+        "triggers": triggers,
+        "conditions": conditions,
+        "actions": actions,
+        "cooldownSeconds": max(0, min(86400, _finite_number(source.get("cooldownSeconds", 30), "Mindestpause"))),
+        "conditionValidation": validation,
+    }
+
+
+def _validate_web_condition(source, nodes, trigger):
+    if not isinstance(source, dict):
+        raise ValueError("Auslöser oder Bedingung ist ungültig")
+    allowed = ("attribute", "attributeChangedBy", "timeDaily", "timeOnce") if trigger else ("attribute", "timeAfter", "timeBefore")
+    kind = str(source.get("kind", "attribute"))
+    if kind not in allowed:
+        raise ValueError(f"{kind} wird vom Server nicht als {'Auslöser' if trigger else 'Bedingung'} unterstützt")
+    result = {"id": str(source.get("id") or uuid.uuid4()), "kind": kind}
+    if kind.startswith("time"):
+        result["minuteOfDay"] = max(0, min(1439, int(_finite_number(source.get("minuteOfDay", 0), "Uhrzeit"))))
+        if kind == "timeOnce":
+            scheduled = str(source.get("scheduledAt", "")).strip()
+            try:
+                dt.datetime.fromisoformat(scheduled.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise ValueError("Der einmalige Zeitpunkt ist ungültig") from error
+            result.update({"scheduledAt": scheduled, "isConsumed": bool(source.get("isConsumed", False))})
+        return result
+    node_id, attribute_id, _attribute = _automation_attribute(source, nodes)
+    comparison = str(source.get("comparison", "equal"))
+    if comparison not in ("equal", "notEqual", "greater", "less"):
+        raise ValueError("Der Vergleich ist ungültig")
+    result.update({
+        "nodeID": node_id, "attributeID": attribute_id, "comparison": comparison,
+        "value": _finite_number(source.get("value", 0), "Vergleichswert"),
+    })
+    if kind == "attributeChangedBy":
+        unit = str(source.get("changeUnit", "absolute"))
+        result["changeUnit"] = unit if unit in ("absolute", "percent") else "absolute"
+    return result
+
+
+def _validate_web_action(source, nodes):
+    if not isinstance(source, dict):
+        raise ValueError("Eine Aktion ist ungültig")
+    kind = str(source.get("kind", "setAttribute"))
+    result = {
+        "id": str(source.get("id") or uuid.uuid4()), "kind": kind,
+        "delaySeconds": max(0, min(86400, _finite_number(source.get("delaySeconds", 0), "Verzögerung"))),
+    }
+    if kind in ("setAttribute", "toggleAttribute"):
+        node_id, attribute_id, attribute = _automation_attribute(source, nodes)
+        if not attribute.get("editable", False):
+            raise ValueError(f"{attribute.get('name', 'Attribut')} ist nicht steuerbar")
+        result.update({"nodeID": node_id, "attributeID": attribute_id})
+        if kind == "setAttribute":
+            value = _finite_number(source.get("value", 0), "Zielwert")
+            minimum, maximum = attribute.get("minimum"), attribute.get("maximum")
+            if minimum is not None and value < float(minimum):
+                raise ValueError(f"Zielwert für {attribute.get('name')} liegt unter dem Minimum")
+            if maximum is not None and value > float(maximum):
+                raise ValueError(f"Zielwert für {attribute.get('name')} liegt über dem Maximum")
+            result["value"] = value
+        elif not AutomationEngine._is_toggleable(attribute):
+            raise ValueError("Umschalten ist nur bei einem schreibbaren 0/1-Attribut möglich")
+        return result
+    if kind == "roborockCleaning":
+        node_id = int(_finite_number(source.get("nodeID", 0), "Roborock"))
+        node = nodes.get(node_id)
+        if not node or node.get("integration_module") != "roborock":
+            raise ValueError("Der gewählte Roborock läuft nicht als lokales Servermodul")
+        target = str(source.get("roborockTarget", "complete"))
+        if target not in ("complete", "room", "routine", "spot"):
+            raise ValueError("Das Roborock-Ziel ist ungültig")
+        result.update({
+            "nodeID": node_id, "roborockTarget": target,
+            "roborockTargetValue": _finite_number(source.get("roborockTargetValue", -1), "Reinigungsziel"),
+        })
+        for key in ("roborockCleaningType", "roborockSuction", "roborockWater"):
+            if source.get(key) not in (None, ""):
+                result[key] = _finite_number(source[key], key)
+        return result
+    raise ValueError("Im Webportal sind nur lokale Geräteaktionen und Roborock-Reinigungen erlaubt")
+
+
+def _automation_attribute(source, nodes):
+    node_id = int(_finite_number(source.get("nodeID", 0), "Gerät"))
+    attribute_id = int(_finite_number(source.get("attributeID", 0), "Attribut"))
+    node = nodes.get(node_id)
+    attribute = next((item for item in (node or {}).get("attributes", []) if int(item.get("id", 0)) == attribute_id), None)
+    if not node or not attribute:
+        raise ValueError("Das gewählte Gerät oder Attribut ist nicht mehr verfügbar")
+    return node_id, attribute_id, attribute
+
+
+def _finite_number(value, title):
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{title} ist keine Zahl") from error
+    if not math.isfinite(number):
+        raise ValueError(f"{title} ist ungültig")
+    return number
 
 
 def _display_widgets(values):
@@ -1335,7 +1519,7 @@ async def set_attribute(node_id: int, attribute_id: int, command: AttributeComma
 
 @app.put("/api/v1/automations")
 async def save_automations(payload: AutomationPayload):
-    automation_engine.replace(payload.automations)
+    automation_engine.replace_from_app(payload.automations)
     return {"ok": True}
 
 

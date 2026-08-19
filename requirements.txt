@@ -6,3 +6,4 @@ pyserial==3.5
 websockets==15.0.1
 python-roborock==6.2.1
 boschshcpy==0.6.1
+cryptography==45.0.6

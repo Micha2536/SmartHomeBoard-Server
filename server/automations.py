@@ -12,6 +12,8 @@ class AutomationEngine:
         self.runtime = runtime
         self.timezone = ZoneInfo(timezone)
         self.rules = runtime.database.setting("automations", [])
+        self.server_owned_ids = set(runtime.database.setting("automation_server_owned_ids", []))
+        self.deleted_ids = set(runtime.database.setting("automation_deleted_ids", []))
         self.last_triggered = runtime.database.setting("automation_last_triggered", {})
         self.synced_at = runtime.database.setting("automations_synced_at", None)
         stored_events = runtime.database.setting("automation_events", [])
@@ -32,14 +34,60 @@ class AutomationEngine:
             task.cancel()
 
     def replace(self, rules):
+        """Replace every rule (kept for imports/tests and explicit administration)."""
         self.rules = rules
+        self.server_owned_ids.intersection_update(str(rule.get("id", "")) for rule in rules)
+        self._persist_rules("Automationen vollständig ersetzt")
+
+    def replace_from_app(self, rules):
+        """Synchronize app-owned rules without overwriting web-owned rules."""
+        preserved = [rule for rule in self.rules if str(rule.get("id", "")) in self.server_owned_ids]
+        incoming = [
+            rule for rule in rules
+            if str(rule.get("id", "")) not in self.server_owned_ids
+            and str(rule.get("id", "")) not in self.deleted_ids
+        ]
+        self.rules = preserved + incoming
+        self._persist_rules(f"{len(incoming)} App-Automationen synchronisiert; {len(preserved)} Serverregeln beibehalten")
+
+    def upsert_server(self, rule):
+        rule_id = str(rule.get("id", ""))
+        previous = next((item for item in self.rules if str(item.get("id", "")) == rule_id), None)
+        self.rules = [item for item in self.rules if str(item.get("id", "")) != rule_id]
+        self.rules.append(rule)
+        self.server_owned_ids.add(rule_id)
+        self.deleted_ids.discard(rule_id)
+        self._cancel_rule_tasks(rule_id)
+        self._persist_rules(f"Serverautomation {'aktualisiert' if previous else 'angelegt'}: {rule.get('name', 'Automation')}")
+
+    def delete_server(self, rule_id):
+        rule_id = str(rule_id)
+        previous = next((item for item in self.rules if str(item.get("id", "")) == rule_id), None)
+        if not previous:
+            return False
+        self.rules = [item for item in self.rules if str(item.get("id", "")) != rule_id]
+        self.server_owned_ids.discard(rule_id)
+        self.deleted_ids.add(rule_id)
+        if len(self.deleted_ids) > 500:
+            self.deleted_ids = set(list(self.deleted_ids)[-500:])
+        self._cancel_rule_tasks(rule_id)
+        self._persist_rules(f"Serverautomation gelöscht: {previous.get('name', 'Automation')}")
+        return True
+
+    def _cancel_rule_tasks(self, rule_id):
+        for key in [key for key in self.action_tasks if key.startswith(f"{rule_id}:")]:
+            self.action_tasks.pop(key).cancel()
+
+    def _persist_rules(self, message):
         self.synced_at = time.time()
-        self.runtime.database.set_setting("automations", rules)
+        self.runtime.database.set_setting("automations", self.rules)
         self.runtime.database.set_setting("automations_synced_at", self.synced_at)
+        self.runtime.database.set_setting("automation_server_owned_ids", sorted(self.server_owned_ids))
+        self.runtime.database.set_setting("automation_deleted_ids", sorted(self.deleted_ids))
         for task in self.action_tasks.values():
             task.cancel()
         self.action_tasks.clear()
-        self._record(None, "info", f"{len(rules)} Automationen von der App synchronisiert")
+        self._record(None, "info", message)
 
     def status(self):
         return {
@@ -54,6 +102,7 @@ class AutomationEngine:
                     "condition_count": len(rule.get("conditions", [])),
                     "action_count": len(rule.get("actions", [])),
                     "last_triggered_at": self.last_triggered.get(str(rule.get("id", ""))),
+                    "origin": "server" if str(rule.get("id", "")) in self.server_owned_ids else "app",
                 }
                 for rule in self.rules
             ],

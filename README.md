@@ -256,3 +256,19 @@ Server 0.11.1 erweitert Roborock um modellabhängige Reinigungsarten, Saugstufen
 Server 0.11.2 ergänzt die zusammengesetzte Automationsaktion „Roborock reinigen“. Roboter, Reinigungsart, Saugstufe, Wassermenge und Ziel (komplett, Raum, Routine oder Punkt) werden gemeinsam gespeichert. Der Server setzt die gewählten Modi geschützt und nacheinander und startet die Reinigung erst danach; die Automation läuft damit auch ohne verbundenes iPad zuverlässig weiter.
 
 Server 0.12.0 ergänzt Bosch Smart Home als vollständig lokale Serverintegration. Das einmalige Controller-Pairing erzeugt persistente Clientzertifikate; danach laufen Gerätesnapshot, Long-Poll-Liveupdates, steuerbare Attribute und Bosch-Szenarien unabhängig von iPad und Bosch-Cloud auf dem Server.
+
+Server 0.12.1 merkt sich bei Roborock den zuletzt gestarteten Raum und die zuletzt gestartete Routine persistent. Beide Namen bleiben dadurch im Dashboard-Auswahlfeld sichtbar. Die Reinigungsart „Saugen und Wischen“ wird eindeutig als gleichzeitiger Modus bezeichnet; einen vom Gerät tatsächlich gemeldeten sequenziellen Modus zeigt der Server als „Erst saugen, dann wischen“ an. Bei Modellen ohne diesen Gerätemodus kann die entsprechende Abfolge als Roborock-Routine angelegt und anschließend unter „Routine starten“ gewählt werden.
+
+Server 0.12.2 sendet die V1-Raumreinigung im von `python-roborock` 6.x erwarteten Segmentobjekt. Aktuelle Roboter verwerfen das ältere verschachtelte Listenformat teilweise ohne Fehlermeldung. Die iOS-Auswahl zeigt den angetippten Raum außerdem sofort an und gleicht ihn anschließend mit der Serverbestätigung ab.
+
+Server 0.12.3 trennt bei Roborock Auswahl und Ausführung: Das Antippen eines Raums oder einer Routine speichert nur das Reinigungsziel. Erst der normale Startknopf führt die gewählte Raumreinigung beziehungsweise Routine aus. Mit „Gesamte Fläche“ wird wieder auf die normale Komplettreinigung umgeschaltet.
+
+Server 0.13.0 ergänzt VELUX ACTIVE und MotionBlinds als persistente Serverintegrationen. VELUX übernimmt Rollläden, Position und Auf/Ab/Stopp über die VELUX-Cloud. MotionBlinds erkennt die Rollläden lokal am WLAN-Gateway, verarbeitet UDP-Live-Reports und fragt nach Befehlen den tatsächlichen Zustand aktiv nach. Beide Integrationen liefern dieselben Attribute wie die bisherigen direkten iOS-Verbindungen und stehen dadurch auch ohne verbundenes iPad für Dashboard, E-Paper und Automationen bereit.
+
+Für VELUX werden E-Mail, Passwort und Abfrageintervall eingetragen. Zugangsdaten und erneuerte OAuth-Tokens verbleiben in der lokalen Serverdatenbank; die Verbindung selbst benötigt Internetzugriff zur VELUX-Cloud.
+
+Für MotionBlinds werden die feste IP-Adresse des WLAN-Gateways und dessen Secret Key eingetragen. Der Server verwendet UDP-Port 32100 für Befehle, standardmäßig Port 32200 für Antworten und Multicast `238.0.0.18:32101` für Live-Reports. Bei Docker ist deshalb `network_mode: host` erforderlich, wie in der mitgelieferten Compose-Konfiguration vorgesehen.
+
+Server 0.14.0 ergänzt im Webportal einen vollständigen No-Code-Editor für persistente Serverautomationen. Auslöser können Gerätewerte, Wertänderungen, tägliche Uhrzeiten oder einmalige Zeitpunkte sein. UND-Bedingungen unterstützen Gerätewerte sowie Zeitfenster. Als lokale Aktionen stehen das Setzen und Umschalten steuerbarer Attribute sowie die zusammengesetzte Roborock-Reinigung mit Modus, Saugstufe, Wassermenge und Ziel zur Verfügung. Mehrere Auslöser, Bedingungen und verzögerte Aktionen können direkt im Browser ergänzt, bearbeitet, getestet und gelöscht werden.
+
+Eine im Webportal neu angelegte oder dort bearbeitete Regel wird serververwaltet. Die iPad-Synchronisierung aktualisiert weiterhin App-Regeln, überschreibt serververwaltete Regeln aber nicht und löscht sie auch nicht. Dadurch kann der Server vollständig ohne iPad konfiguriert werden, während beide Oberflächen parallel nutzbar bleiben.
