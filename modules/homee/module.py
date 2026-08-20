@@ -19,7 +19,7 @@ def manifest():
     return {
         "id": "homee",
         "name": "homee",
-        "version": "1.5.1",
+        "version": "1.6.0",
         "icon": "house.lodge",
         "description": "Dauerhafte lokale homee-WebSocket-Verbindung. Geräte und Werte werden auf dem Server gespeichert und an alle Apps verteilt.",
         "supportsDiscovery": False,
@@ -55,6 +55,7 @@ class HomeeAdapter:
         self.connect_lock = None
         self.protocol_messages = deque(maxlen=100)
         self.last_all_request_at = 0.0
+        self.history_requests = {}
 
     async def start(self):
         self.stopping = False
@@ -63,6 +64,7 @@ class HomeeAdapter:
 
     async def stop(self):
         self.stopping = True
+        self._fail_history_requests(ConnectionError("homee-Verbindung wurde beendet"))
         if self.task:
             self.task.cancel()
         if self.socket:
@@ -89,6 +91,35 @@ class HomeeAdapter:
             raise ConnectionError("homee ist nicht verbunden")
         await self.socket.send("GET:nodes")
         self._record_protocol("out", "GET:nodes")
+
+    async def attribute_history(self, node_id, attribute_id, from_timestamp, till_timestamp):
+        node_id = int(node_id)
+        attribute_id = int(attribute_id)
+        from_timestamp = int(from_timestamp)
+        till_timestamp = int(till_timestamp)
+        node = self.nodes.get(node_id)
+        if not node or not any(int(item.get("id", -1)) == attribute_id for item in node.get("attributes", [])):
+            raise KeyError("Unbekanntes homee-Attribut")
+        if not self.socket:
+            raise ConnectionError("homee ist nicht verbunden")
+
+        key = (node_id, attribute_id, from_timestamp, till_timestamp)
+        if key in self.history_requests:
+            return await asyncio.shield(self.history_requests[key])
+
+        future = asyncio.get_running_loop().create_future()
+        self.history_requests[key] = future
+        command = (
+            f"GET:nodes/{node_id}/attributes/{attribute_id}/history"
+            f"?from={from_timestamp}&till={till_timestamp}"
+        )
+        try:
+            await self.socket.send(command)
+            self._record_protocol("out", command)
+            return await asyncio.wait_for(asyncio.shield(future), timeout=12)
+        finally:
+            if self.history_requests.get(key) is future:
+                self.history_requests.pop(key, None)
 
     async def action(self, action_id, payload):
         if action_id == "send_websocket":
@@ -185,6 +216,7 @@ class HomeeAdapter:
     async def _drop_socket(self):
         socket, self.socket = self.socket, None
         self.connected_at = 0.0
+        self._fail_history_requests(ConnectionError("homee-Verbindung wurde unterbrochen"))
         if socket:
             with contextlib.suppress(Exception):
                 await socket.close()
@@ -280,6 +312,9 @@ class HomeeAdapter:
         # Verbindung aktiv, aber kein einziges Gerät wird veröffentlicht.
         if isinstance(payload.get("all"), dict):
             payload = payload["all"]
+        if isinstance(payload.get("attribute_history"), dict):
+            self._resolve_history_request(payload["attribute_history"])
+            return
         self._persist_resources(payload)
         if isinstance(payload.get("nodes"), list):
             incoming = {}
@@ -301,6 +336,34 @@ class HomeeAdapter:
                 await self.context.publish_node(self.nodes[normalized["id"]])
         for attribute in _records(payload, "attribute", "attributes"):
             await self._merge_attribute(attribute)
+
+    def _resolve_history_request(self, history):
+        try:
+            node_id = int(history.get("node_id"))
+            attribute_id = int(history.get("attribute_id"))
+        except (TypeError, ValueError):
+            return
+        candidates = [
+            (key, future) for key, future in self.history_requests.items()
+            if key[0] == node_id and key[1] == attribute_id
+        ]
+        if not candidates:
+            return
+        try:
+            response_from = int(float(history.get("from")))
+            response_till = int(float(history.get("till")))
+            exact = next((item for item in candidates if item[0][2:] == (response_from, response_till)), None)
+        except (TypeError, ValueError):
+            exact = None
+        key, future = exact or candidates[0]
+        if not future.done():
+            future.set_result(history)
+
+    def _fail_history_requests(self, error):
+        for future in self.history_requests.values():
+            if not future.done():
+                future.set_exception(error)
+        self.history_requests.clear()
 
     async def _merge_attribute(self, attribute):
         if not isinstance(attribute, dict):

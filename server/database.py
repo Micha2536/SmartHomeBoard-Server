@@ -94,6 +94,11 @@ class Database:
             rows = self._connection.execute("SELECT payload FROM nodes ORDER BY id").fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
+    def node(self, node_id):
+        with self._lock:
+            row = self._connection.execute("SELECT payload FROM nodes WHERE id=?", (node_id,)).fetchone()
+        return json.loads(row["payload"]) if row else None
+
     def nodes_for_integration(self, integration_id):
         with self._lock:
             rows = self._connection.execute("SELECT payload FROM nodes WHERE integration_id=?", (integration_id,)).fetchall()

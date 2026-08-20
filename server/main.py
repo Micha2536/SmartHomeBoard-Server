@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
@@ -43,7 +43,7 @@ from .setup_portal import (
 )
 
 logging.basicConfig(level=os.getenv("SHB_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-VERSION = "0.16.0"
+VERSION = "0.16.4"
 SETUP_SESSION_COOKIE = "shb_setup_session"
 ENV_API_TOKEN = os.getenv("SHB_API_TOKEN", "").strip()
 database = Database(os.getenv("SHB_DATA_DIR", "/data"))
@@ -70,6 +70,10 @@ class AttributeCommand(BaseModel):
     value: float
 
 
+class NodeNamePayload(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
 class AutomationPayload(BaseModel):
     automations: list[dict] = Field(default_factory=list)
 
@@ -82,6 +86,7 @@ class PushDevicePayload(BaseModel):
     device_token: str = Field(min_length=32, max_length=256)
     environment: str = "production"
     device_name: str = Field(default="iPhone/iPad", max_length=100)
+    device_identifier: str = Field(default="", max_length=200)
 
 
 class PushActionPayload(BaseModel):
@@ -1564,6 +1569,35 @@ async def set_attribute(node_id: int, attribute_id: int, command: AttributeComma
     return {"ok": True}
 
 
+@app.get("/api/v1/nodes/{node_id}/attributes/{attribute_id}/history")
+async def attribute_history(
+    node_id: int,
+    attribute_id: int,
+    from_timestamp: int = Query(alias="from"),
+    till: int = Query(),
+):
+    if from_timestamp >= till or till - from_timestamp > 31_622_400:
+        raise HTTPException(status_code=400, detail="Der angeforderte Verlaufszeitraum ist ungültig")
+    try:
+        return await runtime.attribute_history(node_id, attribute_id, from_timestamp, till)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error))
+
+
+@app.put("/api/v1/nodes/{node_id}/name")
+async def rename_node(node_id: int, payload: NodeNamePayload):
+    try:
+        return await runtime.rename_node(node_id, payload.name)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
 @app.put("/api/v1/automations")
 async def save_automations(payload: AutomationPayload):
     automation_engine.replace_from_app(payload.automations)
@@ -1579,6 +1613,13 @@ async def automations():
 @app.get("/api/v1/automations/status")
 async def automation_status():
     return automation_engine.status()
+
+
+@app.delete("/api/v1/automations/{rule_id}")
+async def delete_automation(rule_id: str):
+    if not automation_engine.delete_server(rule_id):
+        raise HTTPException(status_code=404, detail="Automation wurde nicht gefunden")
+    return {"ok": True}
 
 
 @app.post("/api/v1/automations/{rule_id}/test")
@@ -1600,7 +1641,9 @@ async def control_automation(rule_id: str, payload: AutomationControlPayload):
 @app.post("/api/v1/push/devices")
 async def register_push_device(payload: PushDevicePayload):
     try:
-        count = push_service.register(payload.device_token, payload.environment, payload.device_name)
+        count = push_service.register(
+            payload.device_token, payload.environment, payload.device_name, payload.device_identifier
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     return {"ok": True, "message": f"Push-Gerät registriert ({count})"}

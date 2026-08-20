@@ -74,16 +74,31 @@ class AutomationEngine:
         self.events = (self.runtime.database.setting("automation_events", []) or [])[-50:]
 
     def replace_from_app(self, rules):
-        """Synchronize app-owned rules without overwriting web-owned rules."""
+        """Merge app-owned rules without deleting rules from another device.
+
+        Multiple iPads and Macs can synchronize against the same server. An
+        empty or stale list from one client must therefore never be interpreted
+        as a deletion request. Deletions use ``delete_server`` explicitly.
+        """
         self.refresh_from_database()
         preserved = [rule for rule in self.rules if str(rule.get("id", "")) in self.server_owned_ids]
+        app_rules = {
+            str(rule.get("id", "")): rule
+            for rule in self.rules
+            if str(rule.get("id", "")) not in self.server_owned_ids
+        }
         incoming = [
             rule for rule in rules
             if str(rule.get("id", "")) not in self.server_owned_ids
             and str(rule.get("id", "")) not in self.deleted_ids
         ]
-        self.rules = preserved + incoming
-        self._persist_rules(f"{len(incoming)} App-Automationen synchronisiert; {len(preserved)} Serverregeln beibehalten")
+        for rule in incoming:
+            app_rules[str(rule.get("id", ""))] = rule
+        self.rules = preserved + list(app_rules.values())
+        self._persist_rules(
+            f"{len(incoming)} App-Automationen zusammengeführt; "
+            f"{len(app_rules) - len(incoming)} weitere App-Regeln und {len(preserved)} Serverregeln beibehalten"
+        )
 
     def upsert_server(self, rule):
         self.refresh_from_database()

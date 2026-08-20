@@ -55,12 +55,13 @@ class PushService:
     def key_path(self):
         return os.getenv("SHB_APNS_KEY_PATH", "").strip()
 
-    def register(self, device_token, environment, device_name):
+    def register(self, device_token, environment, device_name, device_identifier=""):
         token = str(device_token).strip().lower()
         if len(token) < 32 or any(character not in "0123456789abcdef" for character in token):
             raise ValueError("Der APNs-Gerätetoken ist ungültig")
         normalized_environment = "sandbox" if environment == "sandbox" else "production"
-        normalized_name = str(device_name or "iPhone/iPad")[:100]
+        normalized_name = str(device_name or "iPhone/iPad").strip()[:100] or "iPhone/iPad"
+        normalized_identifier = str(device_identifier or "").strip()[:200]
         item = {
             "id": hashlib.sha256(token.encode()).hexdigest()[:24],
             "device_token": token,
@@ -68,14 +69,20 @@ class PushService:
             "device_name": normalized_name,
             "updated_at": time.time(),
         }
-        # Eine Neuinstallation erzeugt einen neuen APNs-Token. Der bisherige
-        # Token desselben benannten Geräts darf nicht als scheinbar erfolgreicher
-        # Alt-Empfänger erhalten bleiben.
+        if normalized_identifier:
+            item["device_identifier"] = hashlib.sha256(normalized_identifier.encode()).hexdigest()
+
+        # Gerätenamen sind seit iOS 16 häufig nur noch generische Angaben wie
+        # "iPad" und dürfen deshalb niemals zur Identifikation benutzt werden.
+        # Ein aktualisierter Token ersetzt nur denselben Token oder dieselbe von
+        # der App gelieferte stabile Gerätekennung.
+        identifier_hash = item.get("device_identifier", "")
         devices = [
             entry for entry in (self.database.setting("push_devices", []) or [])
             if entry.get("device_token") != token
             and not (
-                str(entry.get("device_name", "")).casefold() == normalized_name.casefold()
+                identifier_hash
+                and entry.get("device_identifier") == identifier_hash
                 and entry.get("environment") == normalized_environment
             )
         ]

@@ -111,12 +111,23 @@ class PushTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_new_token_replaces_previous_token_of_same_device(self):
         replacement = "c" * 64
-        count = self.service.register(replacement, "sandbox", "Aktuelles iPad")
+        self.service.register(self.valid_token, "sandbox", "Aktuelles iPad", "stable-device-1")
+        count = self.service.register(replacement, "sandbox", "iPad · A1B2", "stable-device-1")
 
         self.assertEqual(count, 2)
         devices = self.database.setting("push_devices", [])
         self.assertNotIn(self.valid_token, [item["device_token"] for item in devices])
         self.assertIn(replacement, [item["device_token"] for item in devices])
+
+    async def test_generic_names_do_not_merge_distinct_devices(self):
+        self.database.set_setting("push_devices", [])
+        self.service.register("c" * 64, "production", "iPad", "stable-ipad")
+        count = self.service.register("d" * 64, "production", "iPad", "stable-mac")
+
+        self.assertEqual(2, count)
+        devices = self.database.setting("push_devices", [])
+        self.assertEqual(2, len(devices))
+        self.assertEqual(2, len({item["device_identifier"] for item in devices}))
 
 
 if __name__ == "__main__":

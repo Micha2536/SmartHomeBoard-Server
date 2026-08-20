@@ -52,6 +52,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(changed["current_value"], 23.5)
         self.assertEqual(changed["last_value"], 20)
 
+    async def test_server_node_name_is_persistent_and_survives_module_updates(self):
+        node = self.database.nodes()[0]
+        renamed = await self.runtime.rename_node(node["id"], "Heizung Keller")
+        self.assertEqual("Heizung Keller", renamed["name"])
+        self.assertEqual("Heizung Keller", self.database.node(node["id"])["name"])
+
+        target = next(item for item in node["attributes"] if item["editable"])
+        await self.runtime.set_value(node["id"], target["id"], 24)
+
+        self.assertEqual("Heizung Keller", self.database.node(node["id"])["name"])
+        self.assertEqual("Heizung Keller", self.database.setting("node_custom_names")[str(node["id"])])
+
     async def test_module_action_is_dispatched_to_active_adapter(self):
         calls = []
 
@@ -63,6 +75,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await self.runtime.integration_action("demo-1", "learn", {"seconds": 60})
         self.assertEqual(calls, [("learn", {"seconds": 60})])
         self.assertEqual(result, {"accepted": True})
+
+    async def test_attribute_history_is_dispatched_to_device_integration(self):
+        node = self.database.nodes()[0]
+        calls = []
+
+        async def attribute_history(node_id, attribute_id, from_timestamp, till_timestamp):
+            calls.append((node_id, attribute_id, from_timestamp, till_timestamp))
+            return {"node_id": node_id, "attribute_id": attribute_id, "results": []}
+
+        self.runtime.adapters["demo-1"].attribute_history = attribute_history
+        result = await self.runtime.attribute_history(node["id"], 17, 1000, 2000)
+        self.assertEqual(calls, [(node["id"], 17, 1000, 2000)])
+        self.assertEqual(result["attribute_id"], 17)
 
     async def test_active_integration_test_reuses_existing_adapter(self):
         adapter = self.runtime.adapters["demo-1"]
@@ -122,6 +147,27 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         origins = {item["id"]: item["origin"] for item in engine.status()["automations"]}
         self.assertEqual("server", origins["server-rule"])
         self.assertEqual("app", origins["app-rule"])
+
+    async def test_empty_sync_from_second_device_does_not_delete_app_automation(self):
+        engine = AutomationEngine(self.runtime)
+        ipad_rule = {"id": "ipad-rule", "name": "Vom iPad", "isEnabled": True,
+                     "triggers": [], "conditions": [], "actions": []}
+        engine.replace_from_app([ipad_rule])
+
+        engine.replace_from_app([])
+
+        self.assertEqual(["ipad-rule"], [rule["id"] for rule in engine.rules])
+
+    async def test_explicit_delete_removes_app_automation_and_blocks_stale_reupload(self):
+        engine = AutomationEngine(self.runtime)
+        rule = {"id": "shared-rule", "name": "Geteilt", "isEnabled": True,
+                "triggers": [], "conditions": [], "actions": []}
+        engine.replace_from_app([rule])
+
+        self.assertTrue(engine.delete_server("shared-rule"))
+        engine.replace_from_app([rule])
+
+        self.assertEqual([], engine.rules)
 
     async def test_separate_api_and_setup_engines_share_current_automation_state(self):
         api_engine = AutomationEngine(self.runtime)

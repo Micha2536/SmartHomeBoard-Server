@@ -135,6 +135,10 @@ class Runtime:
         if current:
             node["integration_module"] = current.get("module_id")
             node["integration_name"] = current.get("name")
+        custom_names = self.database.setting("node_custom_names", {}) or {}
+        custom_name = str(custom_names.get(str(node["id"]), "")).strip()
+        if custom_name:
+            node["name"] = custom_name
         previous = next((item for item in self.database.nodes_for_integration(integration_id) if item["id"] == node["id"]), None)
         self._add_last_values(previous, node)
         self.database.save_node(integration_id, node)
@@ -147,12 +151,46 @@ class Runtime:
         if self.automation_engine:
             await self.automation_engine.node_changed(previous, node)
 
+    async def rename_node(self, node_id, name):
+        node = self.database.node(int(node_id))
+        if not node:
+            raise KeyError("Servergerät wurde nicht gefunden")
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            raise ValueError("Der Gerätename darf nicht leer sein")
+        normalized_name = normalized_name[:120]
+        integration_id = str(node.get("integration_id", ""))
+        if not integration_id:
+            raise KeyError("Servergerät besitzt keine Integrationszuordnung")
+        custom_names = self.database.setting("node_custom_names", {}) or {}
+        custom_names[str(node["id"])] = normalized_name
+        self.database.set_setting("node_custom_names", custom_names)
+        node["name"] = normalized_name
+        self.database.save_node(integration_id, node)
+        self.sequence += 1
+        self.database.set_setting("sequence", self.sequence)
+        await self.broadcast({"type": "node", "sequence": self.sequence, "node": node})
+        return node
+
     async def set_value(self, node_id, attribute_id, value):
         for integration_id, adapter in self.adapters.items():
             if any(node["id"] == node_id for node in self.database.nodes_for_integration(integration_id)):
                 await adapter.set_value(node_id, attribute_id, value)
                 return
         raise KeyError("Gerät gehört zu keiner aktiven Serverintegration")
+
+    async def attribute_history(self, node_id, attribute_id, from_timestamp, till_timestamp):
+        node = self.database.node(int(node_id))
+        if not node:
+            raise KeyError("Servergerät wurde nicht gefunden")
+        integration_id = str(node.get("integration_id", ""))
+        adapter = self.adapters.get(integration_id)
+        if not adapter:
+            raise KeyError("Serverintegration ist nicht aktiv")
+        handler = getattr(adapter, "attribute_history", None)
+        if not handler:
+            raise ValueError("Diese Serverintegration stellt keinen Verlauf bereit")
+        return await handler(node_id, attribute_id, from_timestamp, till_timestamp)
 
     async def integration_action(self, integration_id, action_id, payload=None):
         adapter = self.adapters.get(integration_id)

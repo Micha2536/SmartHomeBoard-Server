@@ -2,6 +2,14 @@
 
 Der Server verlagert Geräteverbindungen, Zustände und Automationen aus der iOS-App auf einen dauerhaft laufenden Raspberry Pi. Die App bleibt Konfigurationsoberfläche und Dashboard.
 
+Server 0.16.4 stellt den Messwertverlauf serverseitig angebundener homee-Geräte auch der iOS-App bereit. Der Abruf läuft über die bereits aktive homee-WebSocket-Sitzung und erzeugt weder einen zusätzlichen Login noch eine zweite Verbindung.
+
+Server 0.16.3 speichert über die App geänderte Namen von Servergeräten zentral und persistent. Die Überschreibung bleibt bei Modulupdates und neuen Gerätesnapshots erhalten und wird per Liveverbindung an alle verbundenen iPads und Macs verteilt.
+
+Server 0.16.2 führt Automationslisten mehrerer iPads und Macs verlustfrei zusammen. Eine leere oder veraltete Liste eines zweiten Geräts löscht keine vorhandenen Regeln mehr; gelöscht wird ausschließlich über einen ausdrücklichen Löschbefehl. Für bestehende EnOcean-Installationen muss `ENOCEAN_DEVICE` in `.env` auf den stabilen USB300-Pfad unter `/dev/serial/by-id/` zeigen.
+
+Server 0.16.1 identifiziert Push-Empfänger über eine stabile, nicht angezeigte Gerätekennung statt über den seit iOS 16 häufig generischen Gerätenamen `iPad`. iPad und eine auf dem Mac ausgeführte iPad-App bleiben dadurch getrennte Empfänger und erhalten unterscheidbare Anzeigenamen.
+
 Server 0.16.0 trennt bei Z-Wave-Aktoren Rückmeldung und Befehl eindeutig: `current_value` enthält ausschließlich den vom Gerät gemeldeten Istwert, `target_value` den über Z-Wave JS schreibbaren Sollwert. Zusammengehörige `currentValue`-/`targetValue`-Paare werden unabhängig von ihrer Lieferreihenfolge als genau ein bedienbares Attribut angelegt.
 
 ## Raspberry Pi installieren

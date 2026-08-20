@@ -198,6 +198,36 @@ class HomeeModuleTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_history_uses_existing_socket_and_returns_matching_response(self):
+        async def scenario():
+            class Socket:
+                def __init__(self):
+                    self.messages = []
+
+                async def send(self, message):
+                    self.messages.append(message)
+
+            adapter = homee.HomeeAdapter({}, Context())
+            adapter.nodes = {
+                12: {"id": 12, "attributes": [{"id": 99, "node_id": 12, "current_value": 21.5}]}
+            }
+            adapter.socket = Socket()
+            request = asyncio.create_task(adapter.attribute_history(12, 99, 1000, 2000))
+            await asyncio.sleep(0)
+            self.assertEqual(
+                adapter.socket.messages,
+                ["GET:nodes/12/attributes/99/history?from=1000&till=2000"],
+            )
+            await adapter._handle_message(
+                '{"attribute_history":{"node_id":12,"attribute_id":99,"from":1000,"till":2000,'
+                '"results":[{"series":[{"values":[[1000,20.5],[2000,21.5]]}]}]}}'
+            )
+            history = await request
+            self.assertEqual(history["node_id"], 12)
+            self.assertEqual(history["results"][0]["series"][0]["values"][-1], [2000, 21.5])
+
+        asyncio.run(scenario())
+
     def test_protocol_categories_normalize_plural_and_payload_wrappers(self):
         self.assertEqual("node", homee._protocol_category({"nodes": []}))
         self.assertEqual("attribute", homee._protocol_category({"attributes": []}))
