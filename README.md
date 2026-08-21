@@ -2,57 +2,19 @@
 
 Der Server verlagert Geräteverbindungen, Zustände und Automationen aus der iOS-App auf einen dauerhaft laufenden Raspberry Pi. Die App bleibt Konfigurationsoberfläche und Dashboard.
 
-Server 0.20.2 führt den eigenständigen Automationsauslöser **„Gerätewert ändert sich“** ein. Er benötigt nur Gerät und Attribut und reagiert auf jede tatsächliche Änderung vom letzten zum neuen Wert – ohne Vergleichsart und ohne Vergleichswert. **„Ist ungleich“** bleibt dadurch wieder ein normaler Vergleich mit einem festgelegten Zielwert.
+## Updates
 
-Server 0.20.1 löst den in Push-Nachrichten ausgewählten Gerätewert in verständliche Texte auf. Auswahlattribute verwenden ihre hinterlegte Beschriftung; Fenster, Bewegung, Ein/Aus, Alarm, FT55-Taster und Rollläden erscheinen beispielsweise als „Offen“, „Geschlossen“, „Bewegung“, „Keine Bewegung“, „Ein“ oder „Aus“ statt als rohe Zahl.
-
-Server 0.20.0 führt ein persistentes **Schaltprotokoll** ein. Jeder Serverbefehl speichert millisekundengenauen Zeitstempel, Gerät und Attribut, alten und angeforderten Wert, Erfolg oder Fehler sowie seine Quelle. iOS-/Mac-Befehle enthalten den konkreten App-Gerätenamen und die stabile Clientkennung; Automationen enthalten Namen, Regel-ID, Aktion und Auslöserkontext. Zusätzlich protokolliert der Server rückgemeldete Änderungen schaltbarer Attribute. Liegt dazu innerhalb von 15 Sekunden kein passender SHB-Befehl vor, erscheint die Quelle als **Extern / Gerät**. Dadurch lassen sich insbesondere unerwartete Shelly-Schaltungen von SHB-Automationen, App-Befehlen und Shelly-internen Zeitplänen, Scripts, Eingängen oder Cloudsteuerungen unterscheiden. Das filterbare Protokoll steht im Webportal unter **Schaltprotokoll** und über `GET /api/v1/audit/events` bereit; höchstens 10.000 Einträge werden dauerhaft gehalten.
-
-Server 0.19.1 überträgt für laufende Automationen Startzeit und Ablaufzeit an die App, damit der Laufzeit-Kreisel auch bei serverseitig ausgeführten Verzögerungen sichtbar bleibt und vom iPad gestoppt werden kann. Server 0.19.0 verwendet für den Eltako FJ62NP standardmäßig den bidirektionalen GFVS-Dialog A5-3F-7F: SHB sendet FFF80D80, wartet auf die Aktorbestätigung mit der echten Sender-ID und fragt danach mit 00000008 einen weiteren Status ab. Erst empfangene Bestätigungen kennzeichnen das Gerät im Webportal als bidirektional bestätigt; spätere Aktorbestätigungen aktualisieren den Zustand. Der virtuelle F6-Richtungstaster bleibt nur als klar gekennzeichnete Alternative erhalten. Server 0.18.9 ergänzte die getrennten Wippe-A-/Wippe-B-Tests.
-
-Server 0.18.7 gleicht die virtuellen EnOcean-Tastertelegramme mit der Referenzimplementierung EnOceanJS ab: Gedrückt wird mit RPS-Status `0x30`, Loslassen mit `0x20` gesendet, bei 120 ms Tastdauer. Nach jedem Funkauftrag wartet SHB nun auf die ESP3-Antwort des USB300 und meldet Ablehnung oder Zeitüberschreitung, statt einen wirkungslosen Befehl fälschlich als erfolgreich zu behandeln.
-
-Server 0.18.6 ergänzt für den Eltako FJ62NP-230V den empfohlenen Anlernpfad als virtuellen EnOcean-Richtungstaster. Der USB300 sendet beim Anlernen vier normale RPS-Tastendrücke samt Loslassen; Rauf, Runter und Stopp verwenden danach ebenfalls Tastertelegramme statt GFVS-Fahrbefehlen. Die Integrationsseite führt jetzt eindeutig zum vollständigen EnOcean-Anlerndialog und erklärt, dass der dortige F6-Fallback keine Geräteauswahl ist.
-
-Server 0.18.5 zeigt beim EnOcean-Anlernen nach der Profilauswahl sofort eine nummerierte, gerätespezifische Anleitung. Für den Eltako FJ62NP-230V sind Lernmodus, GFVS-Lerntelegramm, Bestätigung und Funktionstest konkret beschrieben; für alle übrigen EEPs erzeugt SHB passend zur Telegrammfamilie und zum Unterstützungsstand eine verständliche Anleitung.
-
-Server 0.18.4 stellt im EnOcean-Webportal wieder den vollständigen, durchsuchbaren EEP-Katalog bereit. Das neue bidirektionale Rollladenprofil **A5-3F-7F** unterstützt unter anderem den Eltako FJ62NP-230V: SHB liest die USB300-Basis-ID, sendet das GFVS-Lerntelegramm und stellt Öffnen, Stoppen und Schließen als normale Rollladensteuerung bereit.
-
-Server 0.18.3 übernimmt die von jeder Hue-Leuchte gemeldeten Lichteffekte als übersetzte Auswahl. Neue Bridges werden über `effects_v2`, ältere Geräte weiterhin über `effects` gesteuert. Meldet ein Hue-Gerät die Identify-Aktion, erscheint zusätzlich der kurzzeitige Schalter **Erkennungsmodus**.
-
-Server 0.18.2 kennzeichnet von der Hue Bridge erzeugte Gruppen eindeutig im Gerätenamen: Räume erscheinen als **Raum: Name**, Zonen als **Zone: Name**. Dadurch lassen sie sich in Gerätelisten, Dashboard-Auswahl und Automationen zuverlässig von gleichnamigen Lampen unterscheiden.
-
-Server 0.18.1 korrigiert die Attribut-ID-Vergabe des Philips-Hue-Adapters. Attribute werden nun je Hue-Gerät unabhängig und stabil nummeriert, statt einen gemeinsamen Integrationszähler zu verwenden. Die irrtümliche Begrenzung auf 99 Hue-Attribute wurde entfernt; bereits vom ersten Adapterstand gespeicherte Attribut-IDs werden automatisch übernommen.
-
-Server 0.18.0 ergänzt einen lokalen **Philips Hue Bridge**-Adapter auf Basis der Hue API v2. Bridges können per mDNS gefunden oder über ihre IP-Adresse eingetragen und nach Druck auf die physische Link-Taste direkt im SHB-Webportal beziehungsweise in der iOS-App gekoppelt werden. Lampen, gruppierte Raumlichter, Bewegungs-, Temperatur-, Helligkeits-, Kontakt-, Taster- und Batteriesensoren werden importiert. Schalten, Dimmen, RGB-Farbe und Farbtemperatur sind schreibbar; Änderungen der Hue Bridge werden über den lokalen SSE-Endpunkt `/eventstream/clip/v2` live und mit automatischem Wiederverbinden übernommen.
-
-Server 0.17.8 stellt den BLU-Livefeed über RPC sicher: Das SmartHomeBoard-Script meldet beim Shelly Scan-Manager immer einen eigenen kontinuierlichen BLE-Scanauftrag an, auch wenn der CloudRelay bereits scannt. Die empfangenen `fcd2`-Pakete werden anschließend mit `Shelly.emitEvent` als `NotifyEvent` an die verbundenen lokalen RPC-WebSocket-Clients gesendet. Groß- und kleingeschriebene Varianten der Scanner-API werden unterstützt.
-
-Server 0.17.7 berücksichtigt bei `BLE.CloudRelay.ListInfos` auch das von Shelly Pro gelieferte verschachtelte Format `devices: [{"MAC": {...}}]`. Dadurch werden bereits vom CloudRelay empfangene BLU-Geräte samt BTHome-Service-Daten beim SHB-Anlernen sicher erkannt.
-
-Server 0.17.6 nutzt beim BLU-Anlernen zusätzlich `BLE.CloudRelay.ListInfos`, wenn der Shelly den Sensor bereits für die Shelly Cloud empfängt. Außerdem läuft der lokale SmartHomeBoard-BLE-Scanner nun auf allen scriptfähigen Shellys einschließlich Pro-Geräten parallel zur nativen BTHome-Suche. Damit werden BLU-Geräte auch dann lokal über RPC erkannt, wenn `BTHome.StartDeviceDiscovery` auf dem Gateway keine Geräte meldet.
-
-Server 0.17.5 korrigiert den BLE-Scanner für Shelly-Plus-Geräte: BTHome-Pakete werden entsprechend der Shelly-API aus `service_data["fcd2"]` gelesen und über ein lokales RPC-Ereignis an den Server weitergegeben. Ein bereits installierter SmartHomeBoard-BLE-Scanner wird beim Serverstart automatisch mit dem korrigierten Code überschrieben und neu gestartet.
-
-Server 0.17.4 startet die native BTHome-Gerätesuche direkt auf jeder bereits offenen Shelly-WebSocket-Verbindung. Die Integrationsansicht zeigt den Verbindungsstatus jedes Gateways und während beziehungsweise nach dem Anlernen die letzten BLU-relevanten Rohereignisse. Taucht eine neue dynamische BTHome-Komponente erst nach dem Serverstart auf, wird ihre Konfiguration unmittelbar neu geladen und die MAC-Zuordnung erneut aufgebaut.
-
-Server 0.17.3 wertet beim BLU-Anlernen auf allen Shelly-WebSockets neben `bthome.device_discovered` auch normale `NotifyStatus`- und `NotifyEvent`-Nachrichten vorhandener `bthomedevice`- und `bthomesensor`-Komponenten aus. Dadurch wird ein bereits auf einem Shelly Pro registrierter Door/Window beim Öffnen oder Schließen anhand seiner MAC-Adresse als neuer SHB-Kandidat erkannt, mit der zuvor gewählten Vorlage angelegt und bei Empfang über mehrere Shellys nicht dupliziert.
-
-Server 0.17.2 ergänzt für Shelly-Plus-Geräte ohne native `BTHome.StartDeviceDiscovery`-Methode einen lokalen BLE-Scanner. Der Server installiert dafür einmalig das aktivierte Shelly-Script **SmartHomeBoard BLE v1**. Es filtert BTHome-Werbepakete und überträgt sie über die ohnehin bestehende lokale RPC-WebSocket-Verbindung. BLU Door/Window wird einschließlich Batterie, Kontakt, Helligkeit und Öffnungswinkel dekodiert; Empfang über mehrere Gateways bleibt dedupliziert.
-
-Server 0.17.1 zeigt im Webportal unter jeder Integration deren Geräte und einen persistenten Aktiv-Schalter. Deaktivierte Geräte bleiben in der Serverdatenbank, empfangen weiterhin aktuelle Werte und können weiter von Serverautomationen verwendet werden, werden aber nicht mehr an App-Dashboards ausgeliefert. Beim erneuten Aktivieren erscheinen vorhandene Dashboard-Kacheln wieder.
-
-Server 0.17.0 ergänzt Shelly Gen2, Gen3 und Gen4 einschließlich dynamischer Plus-Add-on-Komponenten und Shelly BLU/BTHome. Shellys werden per mDNS oder über zusätzliche IP-Adressen gefunden und dauerhaft über RPC-WebSockets überwacht. BLU-Geräte werden beim 30-sekündigen Anlernen auf allen geeigneten Shellys empfangen und anhand ihrer MAC-Adresse gatewayübergreifend zusammengeführt.
-
-Server 0.16.4 stellt den Messwertverlauf serverseitig angebundener homee-Geräte auch der iOS-App bereit. Der Abruf läuft über die bereits aktive homee-WebSocket-Sitzung und erzeugt weder einen zusätzlichen Login noch eine zweite Verbindung.
-
-Server 0.16.3 speichert über die App geänderte Namen von Servergeräten zentral und persistent. Die Überschreibung bleibt bei Modulupdates und neuen Gerätesnapshots erhalten und wird per Liveverbindung an alle verbundenen iPads und Macs verteilt.
-
-Server 0.16.2 führt Automationslisten mehrerer iPads und Macs verlustfrei zusammen. Eine leere oder veraltete Liste eines zweiten Geräts löscht keine vorhandenen Regeln mehr; gelöscht wird ausschließlich über einen ausdrücklichen Löschbefehl. Für bestehende EnOcean-Installationen muss `ENOCEAN_DEVICE` in `.env` auf den stabilen USB300-Pfad unter `/dev/serial/by-id/` zeigen.
-
-Server 0.16.1 identifiziert Push-Empfänger über eine stabile, nicht angezeigte Gerätekennung statt über den seit iOS 16 häufig generischen Gerätenamen `iPad`. iPad und eine auf dem Mac ausgeführte iPad-App bleiben dadurch getrennte Empfänger und erhalten unterscheidbare Anzeigenamen.
-
-Server 0.16.0 trennt bei Z-Wave-Aktoren Rückmeldung und Befehl eindeutig: `current_value` enthält ausschließlich den vom Gerät gemeldeten Istwert, `target_value` den über Z-Wave JS schreibbaren Sollwert. Zusammengehörige `currentValue`-/`targetValue`-Paare werden unabhängig von ihrer Lieferreihenfolge als genau ein bedienbares Attribut angelegt.
+- **0.20.x:** Wertänderungs-Auslöser, lesbare Push-Werte und Schaltprotokoll.
+- **0.19.x:** Laufzeitstatus für Automationen und bidirektionale EnOcean-Rollläden.
+- **0.18.x:** Philips Hue, Hue-Effekte sowie erweitertes EnOcean-Anlernen.
+- **0.17.x:** Shelly Gen2–4, Plus Add-on, BLU/BTHome und Geräteaktivierung.
+- **0.16.x:** homee-History, Gerätenamen-Synchronisierung, Push-IDs und Z-Wave-Sollwerte.
+- **0.15.x:** Z-Wave, Push-Empfänger und vereinfachte Automationserstellung.
+- **0.14.x:** Webeditor für Automationen und saubere URL-Dekodierung.
+- **0.13.x:** VELUX ACTIVE und MotionBlinds.
+- **0.12.x:** Bosch Smart Home und erweiterte Roborock-Steuerung.
+- **0.11.x:** Roborock-Integration und Reinigungsaktionen.
+- **0.10.x:** E-Paper-Textwerte und lokale Zeitzone.
 
 ## Raspberry Pi installieren
 
@@ -97,14 +59,6 @@ Danach den Server mit `docker compose up -d --build` neu erstellen. Das Webporta
 Automationen können außerdem andere Automationen **abspielen**, **stoppen**, **aktivieren** oder **deaktivieren**. Stoppen bricht auch bereits wartende, verzögerte Aktionen ab. Gegenseitige Endlosschleifen werden serverseitig erkannt und verhindert.
 
 Ab Server 0.15.5 verwenden der API-Prozess der iOS-App und der getrennte Webportal-Prozess SQLite konsequent als gemeinsamen Automationsstand. Änderungen aus der App erscheinen dadurch ohne Serverneustart im Webportal; Webänderungen werden vor der nächsten App-Synchronisierung eingelesen und bleiben erhalten. Die Automationsliste im Webportal aktualisiert sich alle zwei Sekunden im Hintergrund, ohne die Seite neu zu laden oder ihre Scrollposition zu verändern.
-
-Server 0.15.6 verarbeitet beim Push-Empfänger „Alle Geräte“ jeden APNs-Token unabhängig. Ein abgelaufener, widerrufener oder zur falschen Umgebung gehörender Empfänger blockiert dadurch nicht mehr die Zustellung an die übrigen Geräte. Von Apple ausdrücklich als ungültig gemeldete Gerätetokens werden automatisch aus der Empfängerliste entfernt.
-
-Server 0.15.7 führt im Webportal schrittweise durch die Automationserstellung. Technische homee-Attributtypen werden als verständliche deutsche Eigenschaften dargestellt; aktueller Wert, Einheit und Wertebereich erscheinen direkt bei der Auswahl. Binäre Werte werden beispielsweise als Ein/Aus, Geöffnet/Geschlossen oder Alarm/Kein Alarm angeboten.
-
-Server 0.15.8 ersetzt bei einer erneuten Push-Registrierung automatisch den vorherigen APNs-Token desselben iPhones oder iPads. Dadurch können alte Tokens nach einer Neuinstallation nicht mehr einen irreführend erfolgreichen Sammelversand vortäuschen.
-
-Server 0.15.9 unterstützt frei platzierbare Werte in Push-Texten: `{name}` für den Gerätenamen, `{attribute}` für die Eigenschaft, `{value}` für den reinen Wert und `{unit}` für die Einheit. Die bisherigen Platzhalter bleiben aus Kompatibilitätsgründen erhalten.
 
 ## Server aktualisieren
 
@@ -345,45 +299,13 @@ Darstellungsaktionen wie Pop-up, Ton oder Seitenwechsel werden als `client_actio
 
 Im reinen Heimnetz schützt der API-Schlüssel vor unbeabsichtigtem Zugriff. Für Zugriffe über das Internet den Port nicht direkt freigeben, sondern VPN oder einen TLS-Reverse-Proxy einsetzen. Die optionale Umgebungsvariable `SHB_API_TOKEN` wird aus Kompatibilitätsgründen weiterhin unterstützt, sperrt aber Änderungen über die Webseite, solange sie gesetzt ist.
 
-Server 0.10.6 verwendet für E-Paper-Attribute mit der Einheit `text` den dekodierten Inhalt des `data`-Feldes als Anzeigewert. Der numerische `current_value` und die Einheit `text` werden in diesem Fall nicht mehr auf dem Display ausgegeben.
-
-Server 0.10.7 überträgt den E-Paper-Zeitstempel in der mit `SHB_TIMEZONE` konfigurierten lokalen Zeitzone. Mit der Voreinstellung `Europe/Berlin` werden Sommer- und Winterzeit automatisch korrekt berücksichtigt.
-
-Server 0.11.0 ergänzt die persistente Roborock-Integration, gemeinsame Modulaktionen in iOS-App und Webportal sowie die gerätespezifische Darstellung und Steuerung in der App.
-
-Server 0.11.1 erweitert Roborock um modellabhängige Reinigungsarten, Saugstufen, Wassermengen, Raumreinigung, Routinen, Punktreinigung und einen echten Stop-Befehl. Die iOS-App besitzt dafür eine eigene Dashboard-Vorlage und blendet nur die vom jeweiligen Gerät gemeldeten Möglichkeiten ein.
-
-Server 0.11.2 ergänzt die zusammengesetzte Automationsaktion „Roborock reinigen“. Roboter, Reinigungsart, Saugstufe, Wassermenge und Ziel (komplett, Raum, Routine oder Punkt) werden gemeinsam gespeichert. Der Server setzt die gewählten Modi geschützt und nacheinander und startet die Reinigung erst danach; die Automation läuft damit auch ohne verbundenes iPad zuverlässig weiter.
-
-Server 0.12.0 ergänzt Bosch Smart Home als vollständig lokale Serverintegration. Das einmalige Controller-Pairing erzeugt persistente Clientzertifikate; danach laufen Gerätesnapshot, Long-Poll-Liveupdates, steuerbare Attribute und Bosch-Szenarien unabhängig von iPad und Bosch-Cloud auf dem Server.
-
-Server 0.12.1 merkt sich bei Roborock den zuletzt gestarteten Raum und die zuletzt gestartete Routine persistent. Beide Namen bleiben dadurch im Dashboard-Auswahlfeld sichtbar. Die Reinigungsart „Saugen und Wischen“ wird eindeutig als gleichzeitiger Modus bezeichnet; einen vom Gerät tatsächlich gemeldeten sequenziellen Modus zeigt der Server als „Erst saugen, dann wischen“ an. Bei Modellen ohne diesen Gerätemodus kann die entsprechende Abfolge als Roborock-Routine angelegt und anschließend unter „Routine starten“ gewählt werden.
-
-Server 0.12.2 sendet die V1-Raumreinigung im von `python-roborock` 6.x erwarteten Segmentobjekt. Aktuelle Roboter verwerfen das ältere verschachtelte Listenformat teilweise ohne Fehlermeldung. Die iOS-Auswahl zeigt den angetippten Raum außerdem sofort an und gleicht ihn anschließend mit der Serverbestätigung ab.
-
-Server 0.12.3 trennt bei Roborock Auswahl und Ausführung: Das Antippen eines Raums oder einer Routine speichert nur das Reinigungsziel. Erst der normale Startknopf führt die gewählte Raumreinigung beziehungsweise Routine aus. Mit „Gesamte Fläche“ wird wieder auf die normale Komplettreinigung umgeschaltet.
-
-Server 0.13.0 ergänzt VELUX ACTIVE und MotionBlinds als persistente Serverintegrationen. VELUX übernimmt Rollläden, Position und Auf/Ab/Stopp über die VELUX-Cloud. MotionBlinds erkennt die Rollläden lokal am WLAN-Gateway, verarbeitet UDP-Live-Reports und fragt nach Befehlen den tatsächlichen Zustand aktiv nach. Beide Integrationen liefern dieselben Attribute wie die bisherigen direkten iOS-Verbindungen und stehen dadurch auch ohne verbundenes iPad für Dashboard, E-Paper und Automationen bereit.
-
 Für VELUX werden E-Mail, Passwort und Abfrageintervall eingetragen. Zugangsdaten und erneuerte OAuth-Tokens verbleiben in der lokalen Serverdatenbank; die Verbindung selbst benötigt Internetzugriff zur VELUX-Cloud.
 
 Für MotionBlinds werden die feste IP-Adresse des WLAN-Gateways und dessen Secret Key eingetragen. Der Server verwendet UDP-Port 32100 für Befehle, standardmäßig Port 32200 für Antworten und Multicast `238.0.0.18:32101` für Live-Reports. Bei Docker ist deshalb `network_mode: host` erforderlich, wie in der mitgelieferten Compose-Konfiguration vorgesehen.
 
-Server 0.14.0 ergänzt im Webportal einen vollständigen No-Code-Editor für persistente Serverautomationen. Auslöser können Gerätewerte, Wertänderungen, tägliche Uhrzeiten oder einmalige Zeitpunkte sein. UND-Bedingungen unterstützen Gerätewerte sowie Zeitfenster. Als lokale Aktionen stehen das Setzen und Umschalten steuerbarer Attribute sowie die zusammengesetzte Roborock-Reinigung mit Modus, Saugstufe, Wassermenge und Ziel zur Verfügung. Mehrere Auslöser, Bedingungen und verzögerte Aktionen können direkt im Browser ergänzt, bearbeitet, getestet und gelöscht werden.
-
 Eine im Webportal neu angelegte oder dort bearbeitete Regel wird serververwaltet. Die iPad-Synchronisierung aktualisiert weiterhin App-Regeln, überschreibt serververwaltete Regeln aber nicht und löscht sie auch nicht. Dadurch kann der Server vollständig ohne iPad konfiguriert werden, während beide Oberflächen parallel nutzbar bleiben.
 
-Server 0.14.1 dekodiert URL-kodierte Anzeigenamen, Attributnamen, Einheiten und Auswahltexte im Webportal zentral. Dadurch erscheinen beispielsweise `%20` als Leerzeichen und UTF-8-Sequenzen wieder als lesbare Umlaute, ohne die persistent gespeicherten Rohwerte oder Gerätezuordnungen zu verändern.
-
 ## Z-Wave
-
-Server 0.15.0 ergänzt Z-Wave als persistente lokale Integration. Der offizielle Z-Wave-JS-Treiber besitzt exklusiv den USB-Stick; SmartHomeBoard verbindet sich lokal mit dessen WebSocket-Server und übernimmt Geräte, Livewerte, schreibbare Attribute, Anlernen und Ausschließen. S2-Sicherheitsklassen werden bestätigt, die fünfstellige Geräte-PIN kann bei Bedarf direkt im SmartHomeBoard-Webportal eingegeben werden.
-
-Server 0.15.1 übernimmt zusätzlich die von jedem Gerät gemeldete Hersteller-ID, den Produkttyp, die Produkt-ID und Firmwareversion sowie die von der offiziellen Z-Wave-JS Config DB aufgelösten Hersteller-, Produkt- und Geräteklassenbezeichnungen. Alle lesbaren skalaren Eigenschaften und Endpunkte werden weiterhin automatisch als SmartHomeBoard-Attribute angelegt; geheime Schlüssel und interne Konfigurationswerte bleiben ausgeblendet.
-
-Server 0.15.2 synchronisiert den angezeigten Z-Wave-Anlernstatus direkt mit dem `inclusionState` des Controllers. Erfolgreiches Anlernen, Zeitablauf, manueller Abbruch, Fehler und Ausschluss setzen den Webportalstatus dadurch zuverlässig zurück; ein vom Controller abgelehnter Start wird nicht mehr fälschlich als aktiv angezeigt.
-
-Server 0.15.3 führt bei Bosch Smart Home den virtuellen `roomClimateControl` und die zugehörigen Raum- oder Heizkörperthermostate anhand ihrer Bosch-Raum-ID zu einem Heizungsgerät zusammen. Dieses enthält gemeinsam Isttemperatur, Luftfeuchtigkeit, Solltemperatur, den veränderbaren Betriebsmodus, Boost und Sommermodus. Die Node-ID des physischen Thermostats bleibt erhalten; der überholte virtuelle Doppel-Node wird beim nächsten Einlesen entfernt.
 
 Auf dem Docker-Host zuerst den stabilen Stick-Pfad bestimmen:
 
