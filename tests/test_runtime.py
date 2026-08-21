@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import importlib.util
 import sys
 import tempfile
@@ -52,6 +53,52 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(changed["current_value"], 23.5)
         self.assertEqual(changed["last_value"], 20)
 
+    async def test_switch_command_audit_records_source_and_confirmation(self):
+        node = self.database.nodes()[0]
+        target = next(item for item in node["attributes"] if item["editable"])
+
+        await self.runtime.set_value(
+            node["id"], target["id"], 23.5,
+            source="ios_app", source_detail="Küchen-iPad", client_id="ipad-1",
+        )
+
+        events = self.database.command_audit(node_id=node["id"])
+        command = next(item for item in events if item["event_kind"] == "command")
+        observed = next(item for item in events if item["event_kind"] == "state_change")
+        self.assertEqual("ios_app", command["source"])
+        self.assertEqual("Küchen-iPad", command["source_detail"])
+        self.assertEqual("confirmed", command["status"])
+        self.assertEqual("23.5", command["observed_value"])
+        self.assertEqual("ios_app", observed["source"])
+
+    async def test_external_control_change_is_identified_without_shb_command(self):
+        node = copy.deepcopy(self.database.nodes()[0])
+        target = next(item for item in node["attributes"] if item["editable"])
+        target["current_value"] = 29
+
+        await self.runtime.publish_node("demo-1", node)
+
+        events = self.database.command_audit(node_id=node["id"], event_kind="state_change")
+        self.assertEqual(1, len(events))
+        self.assertEqual("device_or_external", events[0]["source"])
+        self.assertEqual("20", events[0]["previous_value"])
+        self.assertEqual("29", events[0]["observed_value"])
+
+    async def test_failed_device_command_is_kept_with_error(self):
+        node = self.database.nodes()[0]
+        target = next(item for item in node["attributes"] if item["editable"])
+
+        async def fail(*_args):
+            raise RuntimeError("Shelly nicht erreichbar")
+
+        self.runtime.adapters["demo-1"].set_value = fail
+        with self.assertRaisesRegex(RuntimeError, "Shelly nicht erreichbar"):
+            await self.runtime.set_value(node["id"], target["id"], 0, source="automation", source_detail="Nacht aus")
+
+        event = self.database.command_audit(node_id=node["id"], event_kind="command")[0]
+        self.assertEqual("failed", event["status"])
+        self.assertEqual("Shelly nicht erreichbar", event["error"])
+
     async def test_server_node_name_is_persistent_and_survives_module_updates(self):
         node = self.database.nodes()[0]
         renamed = await self.runtime.rename_node(node["id"], "Heizung Keller")
@@ -75,6 +122,24 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await self.runtime.integration_action("demo-1", "learn", {"seconds": 60})
         self.assertEqual(calls, [("learn", {"seconds": 60})])
         self.assertEqual(result, {"accepted": True})
+
+    async def test_inactive_device_keeps_updating_but_is_hidden_from_app_snapshot(self):
+        node = self.database.nodes()[0]
+        target = next(item for item in node["attributes"] if item["editable"])
+
+        await self.runtime.set_device_dashboard_enabled(node["id"], False)
+        self.assertEqual(1, len(self.database.nodes()))
+        self.assertEqual([], self.runtime.visible_nodes())
+
+        await self.runtime.set_value(node["id"], target["id"], 27.5)
+        stored = self.database.node(node["id"])
+        changed = next(item for item in stored["attributes"] if item["id"] == target["id"])
+        self.assertEqual(27.5, changed["current_value"])
+        self.assertFalse(stored["dashboard_enabled"])
+        self.assertEqual([], self.runtime.visible_nodes())
+
+        await self.runtime.set_device_dashboard_enabled(node["id"], True)
+        self.assertEqual([node["id"]], [item["id"] for item in self.runtime.visible_nodes()])
 
     async def test_attribute_history_is_dispatched_to_device_integration(self):
         node = self.database.nodes()[0]
@@ -205,9 +270,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(engine._trigger_compare(9, 8, 10, "less"))
         self.assertTrue(engine._trigger_compare(9, 10, 10, "equal"))
         self.assertFalse(engine._trigger_compare(10, 10, 10, "equal"))
-        self.assertTrue(engine._trigger_compare(11, 12, 10, "notEqual"))
         self.assertTrue(engine._trigger_compare(10, 11, 10, "notEqual"))
+        self.assertFalse(engine._trigger_compare(11, 12, 10, "notEqual"))
         self.assertFalse(engine._trigger_compare(11, 10, 10, "notEqual"))
+        self.assertFalse(engine._trigger_compare(10, 10, 10, "notEqual"))
+        event = {"node_id": 1, "attribute_id": 2, "previous": 0, "value": 1}
+        changed = {"kind": "attributeChanged", "nodeID": 1, "attributeID": 2}
+        self.assertTrue(engine._event_trigger(changed, event))
+        event["previous"] = 1
+        self.assertFalse(engine._event_trigger(changed, event))
 
     async def test_automation_toggle_accepts_only_editable_binary_attributes(self):
         engine = AutomationEngine(self.runtime)
@@ -274,11 +345,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         }
         engine.replace([target])
         await engine._trigger(target, {}, ignore_cooldown=True)
-        self.assertTrue(engine.status()["automations"][0]["running"])
+        running_status = engine.status()["automations"][0]
+        self.assertTrue(running_status["running"])
+        self.assertIsNotNone(running_status["started_at"])
+        self.assertGreater(running_status["deadline"], running_status["started_at"])
+        self.assertAlmostEqual(60, running_status["deadline"] - running_status["started_at"], places=2)
 
         stopped = await engine.control("target", "stop", source_rule_id="source")
         self.assertTrue(stopped["ok"])
-        self.assertFalse(engine.status()["automations"][0]["running"])
+        stopped_status = engine.status()["automations"][0]
+        self.assertFalse(stopped_status["running"])
+        self.assertIsNone(stopped_status["started_at"])
+        self.assertIsNone(stopped_status["deadline"])
 
         disabled = await engine.control("target", "disable", source_rule_id="source")
         self.assertTrue(disabled["ok"])
@@ -288,6 +366,40 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await engine.control("target", "enable", source_rule_id="source"))["ok"])
         self.assertTrue((await engine.control("target", "play", source_rule_id="source"))["ok"])
         engine._cancel_rule_tasks("target")
+
+    async def test_device_group_condition_supports_counts_and_hold_duration(self):
+        engine = AutomationEngine(self.runtime)
+        node = self.database.nodes()[0]
+        attribute = node["attributes"][0]
+        self.database.set_setting("device_groups", [{"id": "climate", "name": "Klima", "node_ids": [node["id"]]}])
+        condition = {
+            "id": "group-condition", "kind": "groupAttribute", "groupID": "climate",
+            "attributeType": attribute["type"], "comparison": "equal", "value": attribute["current_value"],
+            "aggregation": "exactly", "count": 1, "holdSeconds": 10,
+        }
+        self.assertFalse(engine._condition(condition))
+        engine.held_since["hold:group-condition"] -= 11
+        self.assertTrue(engine._condition(condition))
+
+    async def test_else_actions_run_when_conditions_are_false(self):
+        engine = AutomationEngine(self.runtime)
+        node = self.database.nodes()[0]
+        attribute = node["attributes"][0]
+        rule = {
+            "id": "branch", "name": "Verzweigung", "isEnabled": True,
+            "triggers": [],
+            "conditions": [{"id": "false", "kind": "attribute", "nodeID": node["id"],
+                            "attributeID": attribute["id"], "comparison": "equal", "value": 999}],
+            "actions": [{"id": "then", "kind": "showPopup", "delaySeconds": 60}],
+            "elseActions": [{"id": "else", "kind": "showPopup", "delaySeconds": 60}],
+            "conditionValidation": "triggerTime",
+        }
+        ok, message = await engine._trigger(rule, {}, ignore_cooldown=True)
+        self.assertTrue(ok)
+        self.assertIn("SONST", message)
+        self.assertIn("branch:else", engine.action_tasks)
+        self.assertNotIn("branch:then", engine.action_tasks)
+        engine._cancel_rule_tasks("branch")
 
     async def test_push_action_passes_selected_recipients_and_device_value(self):
         engine = AutomationEngine(self.runtime)
@@ -313,6 +425,26 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             f"{attribute['name']}: {attribute['current_value']:g} {attribute['unit']}",
             calls[0][1],
         )
+
+    async def test_push_device_value_uses_human_readable_state_and_choice_labels(self):
+        engine = AutomationEngine(self.runtime)
+        self.database.save_node("demo-1", {
+            "id": 9876, "name": "Flur", "integration_id": "demo-1", "attributes": [
+                {"id": 1, "node_id": 9876, "type": 10, "name": "Fenster", "unit": "", "current_value": 1},
+                {"id": 2, "node_id": 9876, "type": 25, "name": "Bewegung", "unit": "", "current_value": 0},
+                {"id": 3, "node_id": 9876, "type": 45, "name": "Modus", "unit": "choice", "current_value": 2,
+                 "data": '{"label":"Automatik","options":[{"value":1,"label":"Manuell"},{"value":2,"label":"Automatik"}]}'},
+            ],
+        })
+        base = {"kind": "serverPushNotification", "includeAttributeValue": True, "nodeID": 9876,
+                "title": "Status", "message": "{attribute}: {value}{unit}"}
+        title, window = engine._push_text({**base, "attributeID": 1}, {})
+        _, motion = engine._push_text({**base, "attributeID": 2}, {})
+        _, choice = engine._push_text({**base, "attributeID": 3}, {})
+        self.assertEqual("Status", title)
+        self.assertEqual("Fenster: Offen", window)
+        self.assertEqual("Bewegung: Keine Bewegung", motion)
+        self.assertEqual("Modus: Automatik", choice)
 
 
 if __name__ == "__main__":

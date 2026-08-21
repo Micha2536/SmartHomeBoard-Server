@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import datetime as dt
 from pathlib import Path
 from threading import RLock
 
@@ -49,6 +50,28 @@ class Database:
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS command_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    event_kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    source_detail TEXT NOT NULL DEFAULT '',
+                    client_id TEXT NOT NULL DEFAULT '',
+                    node_id INTEGER NOT NULL,
+                    node_name TEXT NOT NULL DEFAULT '',
+                    attribute_id INTEGER NOT NULL,
+                    attribute_name TEXT NOT NULL DEFAULT '',
+                    integration_id TEXT NOT NULL DEFAULT '',
+                    integration_module TEXT NOT NULL DEFAULT '',
+                    previous_value TEXT,
+                    requested_value TEXT,
+                    observed_value TEXT,
+                    error TEXT NOT NULL DEFAULT '',
+                    metadata TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS command_audit_created_idx ON command_audit(created_at DESC);
+                CREATE INDEX IF NOT EXISTS command_audit_node_idx ON command_audit(node_id, attribute_id, created_at DESC);
             """)
 
     def integrations(self):
@@ -127,6 +150,75 @@ class Database:
     def set_setting(self, key, value):
         with self._lock, self._connection:
             self._connection.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value)))
+
+    def add_command_audit(self, item):
+        created_at = item.get("created_at") or dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds")
+        values = (
+            created_at, str(item.get("event_kind", "command")), str(item.get("status", "recorded")),
+            str(item.get("source", "unknown")), str(item.get("source_detail", "")), str(item.get("client_id", "")),
+            int(item.get("node_id", 0)), str(item.get("node_name", "")), int(item.get("attribute_id", 0)),
+            str(item.get("attribute_name", "")), str(item.get("integration_id", "")),
+            str(item.get("integration_module", "")), self._audit_value(item.get("previous_value")),
+            self._audit_value(item.get("requested_value")), self._audit_value(item.get("observed_value")),
+            str(item.get("error", "")), json.dumps(item.get("metadata", {}), ensure_ascii=False, default=str),
+        )
+        with self._lock, self._connection:
+            cursor = self._connection.execute("""
+                INSERT INTO command_audit(
+                    created_at,event_kind,status,source,source_detail,client_id,node_id,node_name,
+                    attribute_id,attribute_name,integration_id,integration_module,previous_value,
+                    requested_value,observed_value,error,metadata
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, values)
+            audit_id = cursor.lastrowid
+            self._connection.execute("""
+                DELETE FROM command_audit WHERE id NOT IN (
+                    SELECT id FROM command_audit ORDER BY id DESC LIMIT 10000
+                )
+            """)
+        return audit_id
+
+    def update_command_audit(self, audit_id, status, error="", observed_value=None):
+        with self._lock, self._connection:
+            self._connection.execute("""
+                UPDATE command_audit SET status=?,error=?,observed_value=COALESCE(?,observed_value) WHERE id=?
+            """, (str(status), str(error or ""), self._audit_value(observed_value), int(audit_id)))
+
+    def command_audit(self, limit=250, node_id=None, integration_module="", event_kind="", source="", status=""):
+        clauses, values = [], []
+        for column, value in (
+            ("node_id", node_id), ("integration_module", integration_module),
+            ("event_kind", event_kind), ("source", source), ("status", status),
+        ):
+            if value is None or value == "":
+                continue
+            clauses.append(f"{column}=?")
+            values.append(value)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.append(max(1, min(2000, int(limit))))
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT * FROM command_audit{where} ORDER BY id DESC LIMIT ?", values
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item.get("metadata") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                item["metadata"] = {}
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _audit_value(value):
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return "1" if value else "0"
+        if isinstance(value, float):
+            return f"{value:g}"
+        return str(value)
 
     def displays(self):
         with self._lock:

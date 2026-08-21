@@ -24,6 +24,8 @@ class AutomationEngine:
             runtime.database.set_setting("automation_events", self.events)
         self.condition_states = {}
         self.action_tasks = {}
+        self.action_timing = {}
+        self.held_since = {}
         self.timer_task = None
         self.push_service = None
 
@@ -36,6 +38,7 @@ class AutomationEngine:
             self.timer_task.cancel()
         for task in self.action_tasks.values():
             task.cancel()
+        self.action_timing.clear()
 
     def replace(self, rules):
         """Replace every rule (kept for imports/tests and explicit administration)."""
@@ -129,6 +132,7 @@ class AutomationEngine:
     def _cancel_rule_tasks(self, rule_id):
         for key in [key for key in self.action_tasks if key.startswith(f"{rule_id}:")]:
             self.action_tasks.pop(key).cancel()
+            self.action_timing.pop(key, None)
 
     def _persist_rules(self, message, cancel_tasks=True):
         self.synced_at = time.time()
@@ -140,6 +144,7 @@ class AutomationEngine:
             for task in self.action_tasks.values():
                 task.cancel()
             self.action_tasks.clear()
+            self.action_timing.clear()
         self._record(None, "info", message)
 
     def status(self):
@@ -148,24 +153,36 @@ class AutomationEngine:
             "count": len(self.rules),
             "synced_at": self.synced_at,
             "automations": [
-                {
+                self._automation_status(rule)
+                for rule in self.rules
+            ],
+            "recent_events": list(reversed(self.events[-100:])),
+            "device_groups": self.runtime.database.setting("device_groups", []) or [],
+        }
+        if self.push_service:
+            result["push"] = self.push_service.status()
+        return result
+
+    def _automation_status(self, rule):
+        rule_id = str(rule.get("id", ""))
+        timings = [
+            timing
+            for key, timing in self.action_timing.items()
+            if key.startswith(f"{rule_id}:") and key in self.action_tasks
+        ]
+        return {
                     "id": str(rule.get("id", "")),
                     "name": rule.get("name", "Automation"),
                     "enabled": bool(rule.get("isEnabled", True)),
                     "trigger_count": len(rule.get("triggers", [])),
                     "condition_count": len(rule.get("conditions", [])),
-                    "action_count": len(rule.get("actions", [])),
+                    "action_count": len(rule.get("actions", [])) + len(rule.get("elseActions", [])),
                     "last_triggered_at": self.last_triggered.get(str(rule.get("id", ""))),
                     "origin": "server" if str(rule.get("id", "")) in self.server_owned_ids else "app",
-                    "running": any(key.startswith(f"{rule.get('id')}:") for key in self.action_tasks),
-                }
-                for rule in self.rules
-            ],
-            "recent_events": list(reversed(self.events[-100:])),
+                    "running": bool(timings),
+                    "started_at": min((item["started_at"] for item in timings), default=None),
+                    "deadline": max((item["deadline"] for item in timings), default=None),
         }
-        if self.push_service:
-            result["push"] = self.push_service.status()
-        return result
 
     def _record(self, rule, level, message):
         event = {
@@ -238,7 +255,7 @@ class AutomationEngine:
             before = old.get(attribute["id"], {}).get("current_value")
             after = attribute.get("current_value")
             if before is not None and after is not None and before != after:
-                events.append({"node_id": node["id"], "attribute_id": attribute["id"], "previous": before, "value": after,
+                events.append({"node_id": node["id"], "attribute_id": attribute["id"], "attribute_type": attribute.get("type"), "previous": before, "value": after,
                                "device_name": node.get("name", "Gerät"), "attribute_name": attribute.get("name", "Wert")})
         for rule in self.rules:
             if not rule.get("isEnabled", True):
@@ -257,7 +274,12 @@ class AutomationEngine:
                     continue
                 for trigger in rule.get("triggers", []):
                     key = f"{rule.get('id')}:{trigger.get('id')}"
-                    matches = self._time_trigger(trigger, now)
+                    if trigger.get("kind", "").startswith("time"):
+                        matches = self._time_trigger(trigger, now)
+                    elif float(trigger.get("holdSeconds", 0) or 0) > 0:
+                        matches = self._condition(trigger)
+                    else:
+                        continue
                     if matches and not self.condition_states.get(key, False):
                         await self._trigger(rule, {"device_name": "Zeitplan", "attribute_name": "Zeit", "value": now.strftime("%H:%M")})
                     self.condition_states[key] = matches
@@ -271,36 +293,66 @@ class AutomationEngine:
             self._record(rule, "info", message)
             return False, message
         validation = rule.get("conditionValidation", "triggerTime")
-        if validation in ("triggerTime", "both") and not self._conditions_match(rule):
-            message = f"{source} erkannt, aber UND-Bedingungen sind nicht erfüllt"
-            self._record(rule, "warning", message)
-            return False, message
+        conditions = rule.get("conditions", [])
+        conditions_match = self._conditions_match(rule)
+        if conditions and validation in ("triggerTime", "both"):
+            selected_actions = rule.get("actions", []) if conditions_match else rule.get("elseActions", [])
+            if not selected_actions:
+                message = f"{source} erkannt, aber UND-Bedingungen sind nicht erfüllt"
+                self._record(rule, "warning", message)
+                return False, message
+            scheduled_actions = [(action, conditions_match if validation == "both" else None) for action in selected_actions]
+            branch_name = "DANN" if conditions_match else "SONST"
+        elif conditions and validation == "executionTime":
+            scheduled_actions = (
+                [(action, True) for action in rule.get("actions", [])]
+                + [(action, False) for action in rule.get("elseActions", [])]
+            )
+            branch_name = "DANN/SONST"
+        else:
+            scheduled_actions = [(action, None) for action in rule.get("actions", [])]
+            branch_name = "DANN"
         rule_id = str(rule.get("id", ""))
         self.last_triggered[rule_id] = now
         self.runtime.database.set_setting("automation_last_triggered", self.last_triggered)
-        message = f"{source} angenommen – {len(rule.get('actions', []))} Aktion(en) gestartet"
+        message = f"{source} angenommen – Zweig {branch_name} mit {len(scheduled_actions)} Aktion(en) gestartet"
         self._record(rule, "success", message)
-        for action in rule.get("actions", []):
+        for action, expected_conditions in scheduled_actions:
             key = f"{rule.get('id')}:{action.get('id')}"
             previous = self.action_tasks.pop(key, None)
             if previous:
                 previous.cancel()
-            self.action_tasks[key] = asyncio.create_task(self._execute(rule, action, event, key))
+            started_at = time.time()
+            delay = max(0, float(action.get("delaySeconds", 0)))
+            self.action_timing[key] = {
+                "started_at": started_at,
+                "deadline": started_at + delay,
+            }
+            self.action_tasks[key] = asyncio.create_task(
+                self._execute(rule, action, event, key, expected_conditions=expected_conditions)
+            )
         return True, message
 
-    async def _execute(self, rule, action, event, key):
+    async def _execute(self, rule, action, event, key, expected_conditions=None):
         try:
             delay = max(0, float(action.get("delaySeconds", 0)))
             if delay:
                 self._record(rule, "info", f"Aktion {action.get('kind', 'unbekannt')} wartet {delay:g} Sekunden")
                 await asyncio.sleep(delay)
-            if rule.get("conditionValidation") in ("executionTime", "both") and not self._conditions_match(rule):
-                self._record(rule, "warning", "Verzögerte Aktion übersprungen: Bedingungen nicht mehr erfüllt")
+            if expected_conditions is not None and self._conditions_match(rule) != expected_conditions:
+                expected_text = "erfüllt" if expected_conditions else "nicht erfüllt"
+                self._record(rule, "warning", f"Verzögerte Aktion übersprungen: Bedingungen sind nicht mehr {expected_text}")
                 return
             kind = action.get("kind")
             if kind == "setAttribute":
                 if self._attribute(action):
-                    await self.runtime.set_value(int(action.get("nodeID", 0)), int(action.get("attributeID", 0)), float(action.get("value", 0)))
+                    await self.runtime.set_value(
+                        int(action.get("nodeID", 0)), int(action.get("attributeID", 0)), float(action.get("value", 0)),
+                        source="automation",
+                        source_detail=f"{rule.get('name', 'Automation')} ({rule.get('id', '')})",
+                        metadata={"rule_id": rule.get("id"), "rule_name": rule.get("name"),
+                                  "action_id": action.get("id"), "trigger": event or {}},
+                    )
                     result = "am Server ausgeführt"
                 else:
                     await self.runtime.broadcast({"type": "client_action", "action": action, "context": event})
@@ -314,7 +366,13 @@ class AutomationEngine:
                     if current is None:
                         current = attribute.get("target_value", 0)
                     value = 0 if float(current or 0) >= 0.5 else 1
-                    await self.runtime.set_value(int(action.get("nodeID", 0)), int(action.get("attributeID", 0)), value)
+                    await self.runtime.set_value(
+                        int(action.get("nodeID", 0)), int(action.get("attributeID", 0)), value,
+                        source="automation",
+                        source_detail=f"{rule.get('name', 'Automation')} ({rule.get('id', '')})",
+                        metadata={"rule_id": rule.get("id"), "rule_name": rule.get("name"),
+                                  "action_id": action.get("id"), "trigger": event or {}},
+                    )
                     result = "am Server ausgeführt"
                 else:
                     await self.runtime.broadcast({"type": "client_action", "action": action, "context": event})
@@ -357,6 +415,7 @@ class AutomationEngine:
         finally:
             if self.action_tasks.get(key) is asyncio.current_task():
                 self.action_tasks.pop(key, None)
+                self.action_timing.pop(key, None)
 
     def _push_text(self, action, event):
         title = str(action.get("title") or "SmartHomeBoard")
@@ -376,15 +435,7 @@ class AutomationEngine:
             value = attribute.get("current_value")
             if value is None:
                 value = attribute.get("target_value", "")
-            if unit.casefold() == "text":
-                unit = ""
-                data = attribute.get("data", "")
-                try:
-                    parsed = json.loads(data) if isinstance(data, str) else data
-                    value = parsed.get("label", parsed.get("value", data)) if isinstance(parsed, dict) else parsed
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    value = data
-            value_text = f"{value:g}" if isinstance(value, (int, float)) else unquote(str(value))
+            value_text, unit = self._display_attribute_value(attribute, value, unit)
             selected_value = f"{value_text} {unit}".strip()
             device_name = unquote(str(node.get("name") or f"Gerät {node.get('id')}"))
             attribute_name = unquote(str(attribute.get("name") or f"Attribut {attribute.get('id')}"))
@@ -406,10 +457,85 @@ class AutomationEngine:
             message = message.replace(token, value)
         return title.strip() or "SmartHomeBoard", message.strip()
 
+    @staticmethod
+    def _display_attribute_value(attribute, value, unit=""):
+        """Resolve choice and state values exactly as a person expects in a push."""
+        unit = unquote(str(unit or "")).strip()
+        data = attribute.get("data", "")
+        parsed = None
+        if data not in (None, ""):
+            try:
+                parsed = json.loads(data) if isinstance(data, str) else data
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = data
+
+        if unit.casefold() == "choice" and isinstance(parsed, dict):
+            for option in parsed.get("options", []):
+                if not isinstance(option, dict):
+                    continue
+                try:
+                    matches = abs(float(option.get("value")) - float(value)) <= 0.000001
+                except (TypeError, ValueError):
+                    matches = str(option.get("value")) == str(value)
+                if matches:
+                    return unquote(str(option.get("label", value))), ""
+            if parsed.get("label") not in (None, ""):
+                return unquote(str(parsed["label"])), ""
+
+        if unit.casefold() == "text":
+            if isinstance(parsed, dict):
+                text = parsed.get("label", parsed.get("value", value))
+            elif parsed not in (None, ""):
+                text = parsed
+            else:
+                text = value
+            return unquote(str(text)), ""
+
+        try:
+            numeric = float(value)
+            rounded = int(round(numeric))
+        except (TypeError, ValueError):
+            return unquote(str(value)), unit
+
+        attribute_type = int(attribute.get("type", -1) or -1)
+        if attribute_type in {10, 14}:
+            if attribute_type == 10 and rounded == 2:
+                return "Gekippt", ""
+            return ("Offen" if rounded == 1 else "Geschlossen"), ""
+        if attribute_type in {25, 76, 191, 192, 207, 251, 252, 253, 256}:
+            return ("Bewegung" if rounded == 1 else "Keine Bewegung"), ""
+        if attribute_type == 40:
+            return {
+                1: "Oben gedrückt", 2: "Unten gedrückt",
+                3: "Oben losgelassen", 4: "Unten losgelassen",
+            }.get(rounded, f"{numeric:g}"), ""
+        if attribute_type in {135, 300}:
+            return {
+                0: "Geöffnet", 1: "Geschlossen", 2: "Gestoppt",
+                3: "Öffnet", 4: "Schließt",
+            }.get(rounded, f"{numeric:g}"), ""
+        if attribute_type in {12, 16, 17, 30, 52, 54, 68, 70, 71, 77, 78, 79, 80, 117, 118, 119, 120, 121, 122, 123, 132, 138, 139, 140, 141, 143, 181, 182, 209, 228, 289, 330, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367, 368, 369, 370, 387}:
+            return ("Alarm" if rounded == 1 else "Kein Alarm"), ""
+        if attribute_type in {1, 9, 13, 46, 47, 48, 63, 87, 91, 128, 133, 179, 249, 250, 254, 260, 297, 299, 331, 332, 333, 351, 379, 380, 384, 385, 404}:
+            return ("Ein" if rounded == 1 else "Aus"), ""
+        return f"{numeric:g}", unit
+
     def _conditions_match(self, rule):
         return all(self._condition(condition) for condition in rule.get("conditions", []))
 
     def _condition(self, condition):
+        raw_matches = self._raw_condition(condition)
+        hold_seconds = max(0, float(condition.get("holdSeconds", 0) or 0))
+        if hold_seconds <= 0:
+            return raw_matches
+        key = f"hold:{condition.get('id', '')}"
+        if not raw_matches:
+            self.held_since.pop(key, None)
+            return False
+        started = self.held_since.setdefault(key, time.monotonic())
+        return time.monotonic() - started >= hold_seconds
+
+    def _raw_condition(self, condition):
         kind = condition.get("kind")
         now = dt.datetime.now(self.timezone)
         if kind == "timeAfter":
@@ -419,12 +545,43 @@ class AutomationEngine:
         if kind == "attribute":
             value = self._attribute_value(condition)
             return value is not None and self._compare(value, float(condition.get("value", 0)), condition.get("comparison", "equal"))
+        if kind == "groupAttribute":
+            values = self._group_attribute_values(condition)
+            if not values:
+                return False
+            matches = sum(
+                1 for value in values
+                if self._compare(value, float(condition.get("value", 0)), condition.get("comparison", "equal"))
+            )
+            aggregation = condition.get("aggregation", "any")
+            requested = max(0, int(condition.get("count", 1) or 0))
+            if aggregation == "none":
+                return matches == 0
+            if aggregation == "all":
+                return matches == len(values)
+            if aggregation == "atLeast":
+                return matches >= requested
+            if aggregation == "atMost":
+                return matches <= requested
+            if aggregation == "exactly":
+                return matches == requested
+            return matches >= 1
         return True
 
     def _event_trigger(self, trigger, event):
+        if trigger.get("kind") == "groupAttribute":
+            member_ids = set(self._group_node_ids(trigger.get("groupID")))
+            if int(event["node_id"]) not in member_ids:
+                return False
+            attribute_type = trigger.get("attributeType")
+            if attribute_type is not None and int(event.get("attribute_type") or -1) != int(attribute_type):
+                return False
+            return self._condition(trigger)
         if int(trigger.get("nodeID", 0)) != event["node_id"] or int(trigger.get("attributeID", 0)) != event["attribute_id"]:
             return False
         kind = trigger.get("kind")
+        if kind == "attributeChanged":
+            return abs(event["value"] - event["previous"]) > 0.000001
         if kind == "attributeChangedBy":
             change = abs(event["value"] - event["previous"])
             if trigger.get("changeUnit") == "percent":
@@ -438,6 +595,37 @@ class AutomationEngine:
                 trigger.get("comparison", "equal"),
             )
         return False
+
+    def _group_node_ids(self, group_id):
+        group = next(
+            (item for item in (self.runtime.database.setting("device_groups", []) or []) if str(item.get("id")) == str(group_id)),
+            None,
+        )
+        return [int(item) for item in (group or {}).get("node_ids", [])]
+
+    def _group_attribute_values(self, condition):
+        attribute_type = condition.get("attributeType")
+        attribute_name = str(condition.get("attributeName") or "").casefold()
+        values = []
+        for node_id in self._group_node_ids(condition.get("groupID")):
+            node = self.runtime.database.node(node_id)
+            if not node:
+                continue
+            attribute = next(
+                (
+                    item for item in node.get("attributes", [])
+                    if (attribute_type is not None and int(item.get("type", -1)) == int(attribute_type))
+                    or (attribute_type is None and attribute_name and str(item.get("name", "")).casefold() == attribute_name)
+                ),
+                None,
+            )
+            if attribute:
+                value = attribute.get("current_value")
+                if value is None:
+                    value = attribute.get("target_value")
+                if value is not None:
+                    values.append(float(value))
+        return values
 
     @staticmethod
     def _time_trigger(trigger, now):
@@ -493,7 +681,7 @@ class AutomationEngine:
         previous_equal = abs(previous - target) <= epsilon
         current_equal = abs(current - target) <= epsilon
         if comparison == "equal": return not previous_equal and current_equal
-        if comparison == "notEqual": return not current_equal
+        if comparison == "notEqual": return previous_equal and not current_equal
         if comparison == "greater": return previous <= target + epsilon and current > target + epsilon
         if comparison == "less": return previous >= target - epsilon and current < target - epsilon
         return False

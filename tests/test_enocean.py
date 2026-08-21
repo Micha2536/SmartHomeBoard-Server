@@ -1,6 +1,7 @@
 import importlib.util
 import unittest
 import json
+import asyncio
 from pathlib import Path
 
 
@@ -68,7 +69,48 @@ class EnOceanTests(unittest.TestCase):
         self.assertIn("D5-00-01", ids)
         self.assertIn("F6-05-02", ids)
         self.assertIn("F6-02-01-SINGLE", ids)
+        fj62 = next(item for item in profiles if item["id"] == "A5-3F-7F")
+        self.assertEqual("both", fj62["direction"])
+        self.assertEqual("FFF80D80", fj62["teach_payload"])
+        self.assertIn("FJ62NP-230V", fj62["examples"])
+        self.assertTrue(any("4-mal kurz" in step for step in fj62["instructions"]))
         self.assertTrue(any("Eltako" in item.get("examples", "") for item in profiles))
+
+        enriched = {item["id"]: item for item in enocean.profile_catalog()}
+        self.assertTrue(enriched["F6-02-01"]["instructions"])
+        self.assertIn("betät", " ".join(enriched["F6-02-01"]["instructions"]))
+
+    def test_enocean_web_portal_contains_profile_instruction_renderer(self):
+        source = (MODULE_PATH.parents[2] / "server" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('id="learningInstructions"', source)
+        self.assertIn("data-instructions", source)
+        self.assertIn("function renderLearningInstructions()", source)
+        self.assertIn("item.textContent=step", source)
+        portal_source = (MODULE_PATH.parents[2] / "server" / "setup_portal.py").read_text(encoding="utf-8")
+        self.assertIn("EnOcean verwalten und anlernen", portal_source)
+
+    def test_fj62_confirmation_and_esp3_transmit_frame(self):
+        values = enocean.decode_eep("A5-3F-7F", bytes.fromhex("003C0208"))
+        self.assertEqual(4, values["shutter_command"])
+        self.assertEqual(60, values["runtime_seconds"])
+        packet = enocean.encode_esp3_packet(enocean.PACKET_RADIO_ERP1, bytes.fromhex("A5 00 3C 02 08 FF AA BB 00 00"), bytes.fromhex("03FFFFFFFFFF00"))
+        parsed = enocean.ESP3StreamParser().feed(packet)
+        self.assertEqual(1, len(parsed))
+        self.assertEqual(enocean.PACKET_RADIO_ERP1, parsed[0][0])
+
+    def test_usb300_base_id_response_is_read_for_transmission(self):
+        response = enocean.encode_esp3_packet(
+            enocean.PACKET_RESPONSE, bytes.fromhex("00 FF 80 00 00 7F")
+        )
+
+        class Serial:
+            def __init__(self): self.response = response
+            def write(self, value): return len(value)
+            def read(self, _size): value, self.response = self.response, b""; return value
+
+        adapter = enocean.EnOceanAdapter({}, FakeContext({"devices": {}}))
+        adapter.serial = Serial()
+        self.assertEqual(0xFF800000, adapter._read_base_id())
 
     def test_ft55_rocker_events_and_energy_bow_are_decoded_separately(self):
         single_i_pressed = enocean.decode_eep("F6-02-01", bytes([0x10]), "single")
@@ -106,6 +148,149 @@ class FakeContext:
 
 
 class EnOceanDeviceManagementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fj62_learning_sends_gfvs_telegram_and_publishes_shutter_control(self):
+        class Serial:
+            def __init__(self): self.writes = []
+            def write(self, value): self.writes.append(value); return len(value)
+
+        context = FakeContext({"devices": {}})
+        adapter = enocean.EnOceanAdapter({"roller_runtime_seconds": 45}, context)
+        adapter.serial, adapter.base_id = Serial(), 0xFF800000
+        await adapter.action("start_learning", {"eep": "A5-3F-7F", "name": "Rollladen Wohnen", "seconds": 60})
+        packet_type, data, _optional = enocean.ESP3StreamParser().feed(adapter.serial.writes[-1])[0]
+        self.assertEqual(enocean.PACKET_RADIO_ERP1, packet_type)
+        self.assertEqual(bytes.fromhex("FFF80D80"), data[1:5])
+
+        optional = bytes.fromhex("03FFFFFFFF3C00")
+        await adapter._handle_radio(bytes.fromhex("F6 70 01 02 03 04 30"), optional)
+        node = context.published[-1]
+        self.assertEqual(0, adapter.devices["01020304"]["tx_offset"])
+        self.assertTrue(adapter.devices["01020304"]["bidirectional_verified"])
+        self.assertEqual(-60, adapter.devices["01020304"]["confirmation_rssi"])
+        self.assertEqual(1, adapter._next_tx_offset())
+        self.assertEqual(2004, node["profile"])
+        direction = next(item for item in node["attributes"] if item["type"] == 135)
+        self.assertTrue(direction["editable"])
+
+        await adapter.set_value(node["id"], direction["id"], 1)
+        _packet_type, command_data, _optional = enocean.ESP3StreamParser().feed(adapter.serial.writes[-1])[0]
+        self.assertEqual(bytes.fromhex("002D0208"), command_data[1:5])
+
+    async def test_fj62_bidirectional_verification_requests_and_receives_status(self):
+        class Serial:
+            def __init__(self): self.writes = []
+            def write(self, value): self.writes.append(value); return len(value)
+
+        state = {"devices": {"01020304": {
+            "eep": "A5-3F-7F", "profile_id": "A5-3F-7F", "tx_offset": 0,
+            "name": "Rollladen", "raw": "70", "values": {}, "last_seen": 1,
+        }}}
+        context = FakeContext(state)
+        adapter = enocean.EnOceanAdapter({}, context)
+        adapter.serial, adapter.base_id = Serial(), 0xFF800000
+        adapter.reader_task = asyncio.create_task(asyncio.sleep(10))
+
+        verification = asyncio.create_task(adapter._verify_fj62_bidirectional("01020304"))
+        while adapter.response_waiter is None:
+            await asyncio.sleep(0)
+        adapter.response_waiter.set_result(bytes([0]))
+        while "01020304" not in adapter.actor_confirmation_waiters:
+            await asyncio.sleep(0)
+        await adapter._handle_radio(
+            bytes.fromhex("F6 70 01 02 03 04 30"),
+            bytes.fromhex("03FFFFFFFF3C00"),
+        )
+        await verification
+
+        _packet_type, request_data, _optional = enocean.ESP3StreamParser().feed(adapter.serial.writes[-1])[0]
+        self.assertEqual(bytes.fromhex("00000008"), request_data[1:5])
+        self.assertTrue(adapter.devices["01020304"]["bidirectional_verified"])
+        adapter.reader_task.cancel()
+
+    async def test_fj62_direction_profile_teaches_and_controls_with_rps_clicks(self):
+        class Serial:
+            def __init__(self): self.writes = []
+            def write(self, value): self.writes.append(value); return len(value)
+
+        context = FakeContext({"devices": {}})
+        adapter = enocean.EnOceanAdapter({}, context)
+        adapter.serial, adapter.base_id = Serial(), 0xFF800000
+        await adapter.action(
+            "start_learning",
+            {"eep": "F6-02-01-FJ62", "name": "Rollladen Büro", "seconds": 60},
+        )
+
+        self.assertEqual(8, len(adapter.serial.writes))
+        teach_data = [
+            enocean.ESP3StreamParser().feed(packet)[0][1]
+            for packet in adapter.serial.writes
+        ]
+        self.assertEqual([0x30, 0x00] * 4, [item[1] for item in teach_data])
+        self.assertTrue(all(item[0] == enocean.RORG_RPS for item in teach_data))
+        self.assertEqual([0x30, 0x20] * 4, [item[-1] for item in teach_data])
+
+        device = adapter.devices["FF800000"]
+        self.assertEqual("rps_direction", device["control_mode"])
+        node = context.published[-1]
+        direction = next(item for item in node["attributes"] if item["type"] == 135)
+
+        adapter.serial.writes.clear()
+        await adapter.set_value(node["id"], direction["id"], 0)
+        up = [enocean.ESP3StreamParser().feed(packet)[0][1][1] for packet in adapter.serial.writes]
+        self.assertEqual([0x30, 0x00], up)
+
+        adapter.serial.writes.clear()
+        await adapter.set_value(node["id"], direction["id"], 1)
+        down = [enocean.ESP3StreamParser().feed(packet)[0][1][1] for packet in adapter.serial.writes]
+        self.assertEqual([0x10, 0x00], down)
+
+        adapter.serial.writes.clear()
+        await adapter.set_value(node["id"], direction["id"], 2)
+        stop = [enocean.ESP3StreamParser().feed(packet)[0][1][1] for packet in adapter.serial.writes]
+        self.assertEqual([0x10, 0x00], stop)
+
+        adapter.serial.writes.clear()
+        result = await adapter.action("test_device", {"sender_id": "FF800000", "command": 0})
+        direct_test = [enocean.ESP3StreamParser().feed(packet)[0][1][1] for packet in adapter.serial.writes]
+        self.assertEqual([0x30, 0x00], direct_test)
+        self.assertIn("USB300 bestätigt", result["message"])
+
+        adapter.serial.writes.clear()
+        result = await adapter.action("teach_device", {"sender_id": "FF800000", "rocker_pair": "B"})
+        reteach = [enocean.ESP3StreamParser().feed(packet)[0][1][1] for packet in adapter.serial.writes]
+        self.assertEqual([0x70, 0x00] * 4, reteach)
+        self.assertEqual("B", adapter.devices["FF800000"]["rocker_pair"])
+        self.assertIn("Wippe B", result["message"])
+
+        adapter.serial.writes.clear()
+        await adapter.set_value(node["id"], direction["id"], 0)
+        up_after_reteach = [enocean.ESP3StreamParser().feed(packet)[0][1][1] for packet in adapter.serial.writes]
+        self.assertEqual([0x70, 0x00], up_after_reteach)
+
+    async def test_radio_send_checks_usb300_esp3_response(self):
+        class Serial:
+            def write(self, value): return len(value)
+
+        context = FakeContext({"devices": {}})
+        adapter = enocean.EnOceanAdapter({}, context)
+        adapter.serial, adapter.base_id = Serial(), 0xFF800000
+        adapter.reader_task = asyncio.create_task(asyncio.sleep(10))
+
+        async def confirm(return_code):
+            while adapter.response_waiter is None:
+                await asyncio.sleep(0)
+            adapter.response_waiter.set_result(bytes([return_code]))
+
+        confirmation = asyncio.create_task(confirm(0))
+        await adapter._send_rps(0x70, sender_offset=0)
+        await confirmation
+
+        rejection = asyncio.create_task(confirm(3))
+        with self.assertRaisesRegex(ConnectionError, "ungültige Parameter"):
+            await adapter._send_rps(0x70, sender_offset=0)
+        await rejection
+        adapter.reader_task.cancel()
+
     async def test_ft55_double_rocker_publishes_two_instances_and_energy_harvesting(self):
         context = FakeContext({"devices": {}})
         adapter = enocean.EnOceanAdapter({}, context)
@@ -150,6 +335,8 @@ class EnOceanDeviceManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["devices"][0]["sender_id"], "019ADAA0")
         self.assertEqual(adapter.devices["019ADAA0"]["values"]["window_position"], 2)
         self.assertEqual(context.published[-1]["name"], "Fenster Büro")
+        await adapter.action("update_device", {"sender_id": "019ADAA0", "name": "Rollladen", "eep": "F6-02-01-FJ62"})
+        self.assertEqual(adapter.devices["019ADAA0"]["control_mode"], "rps_direction")
         result = await adapter.action("delete_device", {"sender_id": "019ADAA0"})
         self.assertEqual(result["devices"], [])
         self.assertFalse(adapter.devices)

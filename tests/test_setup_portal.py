@@ -1,9 +1,25 @@
 import unittest
 
-from server.setup_portal import _pretty_protocol_message, automations_page, display_text, displays_page, integrations_page
+from server.setup_portal import _pretty_protocol_message, automations_page, command_audit_page, display_text, displays_page, integrations_page
 
 
 class SetupPortalTests(unittest.TestCase):
+    def test_command_audit_page_shows_timestamp_source_and_value_path(self):
+        html = command_audit_page("0.20.0", [{
+            "id": 1, "created_at": "2026-08-21T18:30:01.123+00:00",
+            "event_kind": "state_change", "status": "observed", "source": "device_or_external",
+            "source_detail": "Keine zugehörige SHB-Schaltanforderung erkannt", "client_id": "",
+            "node_id": 11, "node_name": "Shelly Heizraum", "attribute_id": 101,
+            "attribute_name": "Relais · Ausgang", "integration_id": "shelly-1",
+            "integration_module": "shelly", "previous_value": "1", "requested_value": None,
+            "observed_value": "0", "error": "", "metadata": {},
+        }], nodes=[{"id": 11, "name": "Shelly Heizraum", "integration_module": "shelly"}])
+        self.assertIn("Schaltprotokoll", html)
+        self.assertIn("Extern / Gerät", html)
+        self.assertIn("2026-08-21T18:30:01.123+00:00", html)
+        self.assertIn("Shelly Heizraum", html)
+        self.assertIn("Gemeldet: <code>0</code>", html)
+
     def test_automation_editor_offers_control_push_and_recipients(self):
         html = automations_page(
             "0.15.4",
@@ -16,6 +32,9 @@ class SetupPortalTests(unittest.TestCase):
         self.assertIn("Push-Nachricht vom Server", html)
         self.assertIn("Flur iPad", html)
         self.assertIn("pushDeviceIDs", html)
+        self.assertIn("Gerätewert ändert sich", html)
+        self.assertIn("kind!=='attributeChanged'", html)
+        self.assertIn("Ein Vergleichswert ist nicht erforderlich", html)
         self.assertIn("/setup/automations/status", html)
         self.assertIn("setInterval(refreshAutomationOverview,2000)", html)
 
@@ -90,6 +109,28 @@ class SetupPortalTests(unittest.TestCase):
         self.assertIn("Anmeldecode senden", html)
         self.assertIn('class="danger"', html)
 
+    def test_integration_editor_lists_devices_and_visibility_controls(self):
+        manifests = [{"id": "shelly", "name": "Shelly", "description": "Test", "fields": []}]
+        integrations = [{
+            "id": "shelly-1", "module_id": "shelly", "name": "Shelly",
+            "enabled": True, "configuration": {}, "device_count": 2,
+            "status": "Verbunden", "error": None,
+        }]
+        nodes = [
+            {"id": 11, "integration_id": "shelly-1", "name": "Heizraum", "attributes": [{"id": 1}], "dashboard_enabled": True},
+            {"id": 12, "integration_id": "shelly-1", "name": "BLU Fenster", "attributes": [], "dashboard_enabled": False},
+            {"id": 13, "integration_id": "other", "name": "Fremdgerät", "attributes": []},
+        ]
+
+        html = integrations_page("0.17.0", manifests, integrations, selected_id="shelly-1", nodes=nodes)
+
+        self.assertIn("Geräte dieser Integration · 2", html)
+        self.assertIn("Heizraum", html)
+        self.assertIn("BLU Fenster", html)
+        self.assertNotIn("Fremdgerät", html)
+        self.assertIn('action="/setup/integrations/device-visibility"', html)
+        self.assertIn("Nicht aktiv", html)
+
     def test_module_action_can_request_a_temporary_payload_field(self):
         manifests = [{
             "id": "zwave", "name": "Z-Wave", "description": "Test", "fields": [],
@@ -109,6 +150,29 @@ class SetupPortalTests(unittest.TestCase):
         self.assertIn('name="payload__pin"', html)
         self.assertIn('pattern="[0-9]{5}"', html)
         self.assertIn("S2-PIN bestätigen", html)
+
+    def test_module_action_can_offer_a_shelly_blu_template(self):
+        manifests = [{
+            "id": "shelly", "name": "Shelly", "description": "Test", "fields": [],
+            "actions": [{
+                "id": "start_blu_learning", "title": "BLU anlernen",
+                "fields": [{
+                    "key": "template", "title": "Gerätevorlage", "type": "select", "required": True,
+                    "options": [{"value": "motion", "label": "Shelly BLU Motion"}],
+                }],
+            }],
+        }]
+        integrations = [{
+            "id": "shelly-1", "module_id": "shelly", "name": "Shelly",
+            "enabled": True, "configuration": {}, "device_count": 0,
+            "status": "Verbunden", "error": None,
+        }]
+
+        html = integrations_page("0.17.0", manifests, integrations, selected_id="shelly-1")
+
+        self.assertIn('select name="payload__template"', html)
+        self.assertIn('value="motion"', html)
+        self.assertIn("Shelly BLU Motion", html)
 
     def test_epaper_attribute_dropdown_is_filtered_by_device(self):
         displays = [{

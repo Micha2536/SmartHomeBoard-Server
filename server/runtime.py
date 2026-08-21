@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import time
 
 from .modules import ModuleContext
 
@@ -17,6 +18,7 @@ class Runtime:
         self.pending_restarts = {}
         self.sequence = int(database.setting("sequence", 0))
         self.automation_engine = None
+        self.pending_commands = {}
 
     async def start(self):
         self.registry.load()
@@ -139,15 +141,18 @@ class Runtime:
         custom_name = str(custom_names.get(str(node["id"]), "")).strip()
         if custom_name:
             node["name"] = custom_name
+        node["dashboard_enabled"] = self.device_dashboard_enabled(node["id"])
         previous = next((item for item in self.database.nodes_for_integration(integration_id) if item["id"] == node["id"]), None)
         self._add_last_values(previous, node)
+        self._record_observed_control_changes(previous, node)
         self.database.save_node(integration_id, node)
         count = len(self.database.nodes_for_integration(integration_id))
         if current:
             self.database.set_integration_state(integration_id, "Verbunden", None, count)
         self.sequence += 1
         self.database.set_setting("sequence", self.sequence)
-        await self.broadcast({"type": "node", "sequence": self.sequence, "node": node})
+        if node["dashboard_enabled"]:
+            await self.broadcast({"type": "node", "sequence": self.sequence, "node": node})
         if self.automation_engine:
             await self.automation_engine.node_changed(previous, node)
 
@@ -172,12 +177,59 @@ class Runtime:
         await self.broadcast({"type": "node", "sequence": self.sequence, "node": node})
         return node
 
-    async def set_value(self, node_id, attribute_id, value):
-        for integration_id, adapter in self.adapters.items():
-            if any(node["id"] == node_id for node in self.database.nodes_for_integration(integration_id)):
-                await adapter.set_value(node_id, attribute_id, value)
-                return
-        raise KeyError("Gerät gehört zu keiner aktiven Serverintegration")
+    def device_dashboard_enabled(self, node_id):
+        settings = self.database.setting("dashboard_device_enabled", {}) or {}
+        return bool(settings.get(str(int(node_id)), True))
+
+    def visible_nodes(self):
+        settings = self.database.setting("dashboard_device_enabled", {}) or {}
+        return [node for node in self.database.nodes() if bool(settings.get(str(int(node["id"])), True))]
+
+    async def set_device_dashboard_enabled(self, node_id, enabled):
+        node = self.database.node(int(node_id))
+        if not node:
+            raise KeyError("Servergerät wurde nicht gefunden")
+        settings = self.database.setting("dashboard_device_enabled", {}) or {}
+        settings[str(int(node_id))] = bool(enabled)
+        self.database.set_setting("dashboard_device_enabled", settings)
+        node["dashboard_enabled"] = bool(enabled)
+        self.database.save_node(str(node.get("integration_id", "")), node)
+        self.sequence += 1
+        self.database.set_setting("sequence", self.sequence)
+        await self.broadcast_snapshot()
+        return node
+
+    async def set_value(self, node_id, attribute_id, value, source="server_api", source_detail="", client_id="", metadata=None):
+        node = self.database.node(int(node_id))
+        if not node:
+            raise KeyError("Servergerät wurde nicht gefunden")
+        integration_id = str(node.get("integration_id", ""))
+        adapter = self.adapters.get(integration_id)
+        if not adapter:
+            raise KeyError("Gerät gehört zu keiner aktiven Serverintegration")
+        attribute = next((item for item in node.get("attributes", []) if int(item.get("id", 0)) == int(attribute_id)), None)
+        if not attribute:
+            raise KeyError("Geräteattribut wurde nicht gefunden")
+        previous = attribute.get("current_value", attribute.get("target_value"))
+        audit = {
+            "event_kind": "command", "status": "requested", "source": source,
+            "source_detail": source_detail, "client_id": client_id,
+            "node_id": node_id, "node_name": node.get("name", ""),
+            "attribute_id": attribute_id, "attribute_name": attribute.get("name", ""),
+            "integration_id": integration_id, "integration_module": node.get("integration_module", ""),
+            "previous_value": previous, "requested_value": value, "metadata": metadata or {},
+        }
+        audit_id = self.database.add_command_audit(audit)
+        key = (int(node_id), int(attribute_id))
+        self.pending_commands[key] = {**audit, "audit_id": audit_id, "expires_at": time.monotonic() + 15}
+        try:
+            await adapter.set_value(node_id, attribute_id, value)
+            if key in self.pending_commands:
+                self.database.update_command_audit(audit_id, "sent")
+        except Exception as error:
+            self.pending_commands.pop(key, None)
+            self.database.update_command_audit(audit_id, "failed", str(error))
+            raise
 
     async def attribute_history(self, node_id, attribute_id, from_timestamp, till_timestamp):
         node = self.database.node(int(node_id))
@@ -202,7 +254,7 @@ class Runtime:
         return await handler(action_id, payload or {})
 
     async def broadcast_snapshot(self):
-        await self.broadcast({"type": "snapshot", "sequence": self.sequence, "nodes": self.database.nodes()})
+        await self.broadcast({"type": "snapshot", "sequence": self.sequence, "nodes": self.visible_nodes()})
 
     async def broadcast(self, payload):
         dead = []
@@ -228,3 +280,43 @@ class Runtime:
                 attribute["last_value"] = prior.get("current_value")
             elif prior and "last_value" in prior:
                 attribute["last_value"] = prior["last_value"]
+
+    def _record_observed_control_changes(self, previous, node):
+        if not previous:
+            return
+        old = {int(item.get("id", 0)): item for item in previous.get("attributes", [])}
+        now = time.monotonic()
+        self.pending_commands = {
+            key: item for key, item in self.pending_commands.items()
+            if float(item.get("expires_at", 0)) > now
+        }
+        for attribute in node.get("attributes", []):
+            attribute_id = int(attribute.get("id", 0))
+            prior = old.get(attribute_id)
+            if not prior:
+                continue
+            before = prior.get("current_value")
+            after = attribute.get("current_value")
+            if before is None or after is None or before == after:
+                continue
+            is_control = bool(attribute.get("editable") or prior.get("editable")) or int(attribute.get("type", 0) or 0) in {1, 14, 15}
+            if not is_control:
+                continue
+            key = (int(node.get("id", 0)), attribute_id)
+            command = self.pending_commands.pop(key, None)
+            source = command.get("source", "device_or_external") if command else "device_or_external"
+            detail = command.get("source_detail", "Keine zugehörige SHB-Schaltanforderung erkannt") if command else "Keine zugehörige SHB-Schaltanforderung erkannt"
+            self.database.add_command_audit({
+                "event_kind": "state_change", "status": "observed", "source": source,
+                "source_detail": detail, "client_id": command.get("client_id", "") if command else "",
+                "node_id": node.get("id", 0), "node_name": node.get("name", ""),
+                "attribute_id": attribute_id, "attribute_name": attribute.get("name", ""),
+                "integration_id": node.get("integration_id", ""),
+                "integration_module": node.get("integration_module", ""),
+                "previous_value": before,
+                "requested_value": command.get("requested_value") if command else None,
+                "observed_value": after,
+                "metadata": {"command_audit_id": command.get("audit_id")} if command else {},
+            })
+            if command:
+                self.database.update_command_audit(command["audit_id"], "confirmed", observed_value=after)

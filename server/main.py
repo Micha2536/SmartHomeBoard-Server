@@ -37,13 +37,14 @@ from .runtime import Runtime
 from .push import PushService
 from .setup_portal import (
     automations_page as portal_automations,
+    command_audit_page as portal_command_audit,
     dashboard as portal_dashboard,
     displays_page as portal_displays,
-    integrations_page as portal_integrations,
+    integrations_page as _portal_integrations,
 )
 
 logging.basicConfig(level=os.getenv("SHB_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-VERSION = "0.16.4"
+VERSION = "0.20.2"
 SETUP_SESSION_COOKIE = "shb_setup_session"
 ENV_API_TOKEN = os.getenv("SHB_API_TOKEN", "").strip()
 database = Database(os.getenv("SHB_DATA_DIR", "/data"))
@@ -53,6 +54,11 @@ automation_engine = AutomationEngine(runtime, os.getenv("SHB_TIMEZONE", "Europe/
 push_service = PushService(database)
 automation_engine.push_service = push_service
 runtime.automation_engine = automation_engine
+
+
+def portal_integrations(*args, **kwargs):
+    kwargs.setdefault("nodes", database.nodes())
+    return _portal_integrations(*args, **kwargs)
 
 
 class IntegrationPayload(BaseModel):
@@ -80,6 +86,12 @@ class AutomationPayload(BaseModel):
 
 class AutomationControlPayload(BaseModel):
     operation: str
+
+
+class DeviceGroupPayload(BaseModel):
+    id: str = ""
+    name: str = Field(min_length=1, max_length=120)
+    node_ids: list[int] = Field(default_factory=list)
 
 
 class PushDevicePayload(BaseModel):
@@ -282,6 +294,38 @@ async def test_setup_integration(request: Request):
     return setup_response(portal_integrations(VERSION, registry.manifests(), database.integrations(), selected_id=integration_id, message=message, error=error, authenticated=True, token_required=bool(effective_api_token())), status_code=status_code, authenticate=True)
 
 
+@setup_app.post("/setup/integrations/device-visibility", response_class=HTMLResponse, include_in_schema=False)
+async def set_setup_device_visibility(request: Request):
+    values = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+    integration_id = _form_value(values, "integration_id")
+    authenticated = setup_credentials_valid(request, _form_value(values, "current_token"))
+    if effective_api_token() and not authenticated:
+        return setup_response(
+            portal_integrations(
+                VERSION, registry.manifests(), database.integrations(), selected_id=integration_id,
+                error="Der API-Schlüssel ist nicht korrekt.", token_required=True,
+            ),
+            status_code=403,
+        )
+    try:
+        node_id = int(_form_value(values, "node_id"))
+        enabled = _form_value(values, "enabled") == "1"
+        node = database.node(node_id)
+        if not node or str(node.get("integration_id", "")) != integration_id:
+            raise KeyError("Das Gerät gehört nicht zu dieser Integration")
+        await runtime.set_device_dashboard_enabled(node_id, enabled)
+    except (KeyError, TypeError, ValueError) as action_error:
+        return setup_response(
+            portal_integrations(
+                VERSION, registry.manifests(), database.integrations(), selected_id=integration_id,
+                error=str(action_error), authenticated=True, token_required=bool(effective_api_token()),
+            ),
+            status_code=400,
+            authenticate=True,
+        )
+    return RedirectResponse(f"/setup/integrations?edit={integration_id}", status_code=303)
+
+
 @setup_app.post("/setup/integrations/action", response_class=HTMLResponse, include_in_schema=False)
 async def perform_setup_integration_action(request: Request):
     values = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
@@ -453,6 +497,23 @@ async def setup_automations_page(request: Request):
 @setup_app.get("/setup/automations/status", response_class=JSONResponse, include_in_schema=False)
 async def setup_automations_status():
     return automation_engine.status()
+
+
+@setup_app.get("/setup/audit", response_class=HTMLResponse, include_in_schema=False)
+async def setup_command_audit(request: Request):
+    query = request.query_params
+    try:
+        node_id = int(query.get("node_id")) if query.get("node_id") else None
+    except ValueError:
+        node_id = None
+    filters = {
+        "node_id": node_id,
+        "integration_module": query.get("integration_module", ""),
+        "event_kind": query.get("event_kind", ""),
+        "source": query.get("source", ""),
+    }
+    events = database.command_audit(limit=500, **filters)
+    return portal_command_audit(VERSION, events, nodes=database.nodes(), filters=filters)
 
 
 @setup_app.post("/setup", response_class=HTMLResponse, include_in_schema=False)
@@ -667,13 +728,15 @@ async def enocean_setup_action(request: Request):
     authenticated = setup_credentials_valid(request, current_token)
     if effective_api_token() and not authenticated:
         return setup_response(enocean_setup_html(selected_integration=integration_id, error="Der API-Schlüssel ist nicht korrekt."), status_code=403)
-    allowed = {"start_learning", "stop_learning", "update_device", "delete_device"}
+    allowed = {"start_learning", "stop_learning", "test_device", "teach_device", "update_device", "delete_device"}
     if action_id not in allowed:
         return HTMLResponse(enocean_setup_html(selected_integration=integration_id, error="Unbekannte EnOcean-Aktion."), status_code=400)
     payload = {
         "sender_id": values.get("sender_id", [""])[0].strip(),
         "name": values.get("name", [""])[0].strip(),
         "eep": values.get("eep", [""])[0].strip(),
+        "command": values.get("command", [""])[0].strip(),
+        "rocker_pair": values.get("rocker_pair", [""])[0].strip(),
     }
     try:
         await call_local_api(f"api/v1/integrations/{integration_id}/actions/{action_id}", {"payload": payload})
@@ -682,6 +745,8 @@ async def enocean_setup_action(request: Request):
     messages = {
         "start_learning": "Der EnOcean-Anlernmodus läuft jetzt 60 Sekunden.",
         "stop_learning": "Der EnOcean-Anlernmodus wurde beendet.",
+        "test_device": "Das Tastertelegramm wurde vom USB300 bestätigt.",
+        "teach_device": "Vier Richtungstaster-Telegramme wurden gesendet. Bitte die kurze Ab–Stopp-Bestätigung am FJ62 prüfen.",
         "update_device": "Name und Geräteprofil wurden gespeichert.",
         "delete_device": "Das EnOcean-Gerät wurde dauerhaft gelöscht.",
     }
@@ -735,6 +800,7 @@ def validate_web_automation(source, nodes):
         for item in source.get("conditions", [])
     ]
     actions = [_validate_web_action(item, node_map) for item in source.get("actions", [])]
+    else_actions = [_validate_web_action(item, node_map) for item in source.get("elseActions", [])]
     if not triggers:
         raise ValueError("Mindestens ein Auslöser ist erforderlich")
     if not actions:
@@ -749,6 +815,7 @@ def validate_web_automation(source, nodes):
         "triggers": triggers,
         "conditions": conditions,
         "actions": actions,
+        "elseActions": else_actions,
         "cooldownSeconds": max(0, min(86400, _finite_number(source.get("cooldownSeconds", 30), "Mindestpause"))),
         "conditionValidation": validation,
     }
@@ -757,11 +824,12 @@ def validate_web_automation(source, nodes):
 def _validate_web_condition(source, nodes, trigger):
     if not isinstance(source, dict):
         raise ValueError("Auslöser oder Bedingung ist ungültig")
-    allowed = ("attribute", "attributeChangedBy", "timeDaily", "timeOnce") if trigger else ("attribute", "timeAfter", "timeBefore")
+    allowed = ("attribute", "attributeChanged", "attributeChangedBy", "groupAttribute", "timeDaily", "timeOnce") if trigger else ("attribute", "groupAttribute", "timeAfter", "timeBefore")
     kind = str(source.get("kind", "attribute"))
     if kind not in allowed:
         raise ValueError(f"{kind} wird vom Server nicht als {'Auslöser' if trigger else 'Bedingung'} unterstützt")
     result = {"id": str(source.get("id") or uuid.uuid4()), "kind": kind}
+    result["holdSeconds"] = max(0, min(86400, _finite_number(source.get("holdSeconds", 0), "Mindestdauer")))
     if kind.startswith("time"):
         result["minuteOfDay"] = max(0, min(1439, int(_finite_number(source.get("minuteOfDay", 0), "Uhrzeit"))))
         if kind == "timeOnce":
@@ -772,14 +840,34 @@ def _validate_web_condition(source, nodes, trigger):
                 raise ValueError("Der einmalige Zeitpunkt ist ungültig") from error
             result.update({"scheduledAt": scheduled, "isConsumed": bool(source.get("isConsumed", False))})
         return result
-    node_id, attribute_id, _attribute = _automation_attribute(source, nodes)
+    if kind == "attributeChanged":
+        node_id, attribute_id, _attribute = _automation_attribute(source, nodes)
+        result.update({"nodeID": node_id, "attributeID": attribute_id})
+        return result
     comparison = str(source.get("comparison", "equal"))
     if comparison not in ("equal", "notEqual", "greater", "less"):
         raise ValueError("Der Vergleich ist ungültig")
-    result.update({
-        "nodeID": node_id, "attributeID": attribute_id, "comparison": comparison,
-        "value": _finite_number(source.get("value", 0), "Vergleichswert"),
-    })
+    if kind == "groupAttribute":
+        group_id = str(source.get("groupID", "")).strip()
+        groups = database.setting("device_groups", []) or []
+        if not any(str(item.get("id")) == group_id for item in groups):
+            raise ValueError("Die gewählte Gerätegruppe ist nicht mehr verfügbar")
+        aggregation = str(source.get("aggregation", "any"))
+        if aggregation not in ("any", "none", "all", "atLeast", "atMost", "exactly"):
+            raise ValueError("Die Gruppenauswertung ist ungültig")
+        result.update({
+            "groupID": group_id,
+            "attributeType": int(_finite_number(source.get("attributeType", 0), "Attributtyp")),
+            "attributeName": str(source.get("attributeName", ""))[:120],
+            "aggregation": aggregation,
+            "count": max(0, int(_finite_number(source.get("count", 1), "Geräteanzahl"))),
+            "comparison": comparison,
+            "value": _finite_number(source.get("value", 0), "Vergleichswert"),
+        })
+        return result
+    node_id, attribute_id, _attribute = _automation_attribute(source, nodes)
+    result.update({"nodeID": node_id, "attributeID": attribute_id, "comparison": comparison,
+                   "value": _finite_number(source.get("value", 0), "Vergleichswert")})
     if kind == "attributeChangedBy":
         unit = str(source.get("changeUnit", "absolute"))
         result["changeUnit"] = unit if unit in ("absolute", "percent") else "absolute"
@@ -896,6 +984,7 @@ def _display_widgets(values):
 
 async def call_local_api(path, payload=None, method="POST"):
     headers = {"Authorization": f"Bearer {effective_api_token()}"} if effective_api_token() else {}
+    headers.update({"X-SHB-Source": "web_portal", "X-SHB-Client-Name": "SmartHomeBoard Webportal"})
     url = f"http://127.0.0.1:{load_server_config()['port']}/{path.lstrip('/')}"
     async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         response = await client.request(method, url, headers=headers, json=payload)
@@ -919,12 +1008,53 @@ async def load_homee_protocol(integration_id, category="", limit=50):
 
 
 def enocean_profiles():
-    path = Path(os.getenv("SHB_MODULE_DIR", "/app/modules")) / "enocean" / "profiles.json"
-    try:
-        records = json.loads(path.read_text(encoding="utf-8"))
-        return records if isinstance(records, list) else []
-    except (OSError, json.JSONDecodeError):
-        return []
+    candidates = [
+        Path(os.getenv("SHB_MODULE_DIR", "/app/modules")) / "enocean" / "profiles.json",
+        Path(__file__).parents[1] / "modules" / "enocean" / "profiles.json",
+    ]
+    for path in candidates:
+        try:
+            records = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(records, list):
+                return [_enocean_profile_with_instructions(item) for item in records]
+        except (OSError, json.JSONDecodeError):
+            continue
+    return []
+
+
+def _enocean_profile_with_instructions(profile):
+    item = dict(profile) if isinstance(profile, dict) else {}
+    configured = item.get("instructions")
+    if isinstance(configured, list) and configured:
+        item["instructions"] = [str(step).strip() for step in configured if str(step).strip()]
+        return item
+    eep = str(item.get("eep") or item.get("id") or "").upper().replace(".", "-").replace(":", "-")
+    support = str(item.get("support", "catalog"))
+    steps = [f"Im SHB das Profil {item.get('id', eep)} auswählen und einen eindeutigen Gerätenamen eintragen."]
+    if eep.startswith("F6-"):
+        steps.extend([
+            "Anlernen starten und anschließend die gewünschte Taste beziehungsweise Wippe einmal vollständig drücken und loslassen.",
+            "Prüfen, ob Sender-ID und Empfangsstärke erscheinen und die betätigte Taste im Livezustand wechselt.",
+        ])
+    elif eep == "D5-00-01":
+        steps.extend([
+            "Anlernen starten und den Fenster-/Türkontakt einmal öffnen und wieder schließen; falls vorhanden alternativ die Lerntaste kurz betätigen.",
+            "Prüfen, ob der SHB-Zustand anschließend zwischen Offen und Geschlossen wechselt.",
+        ])
+    elif eep.startswith("A5-"):
+        steps.extend([
+            "Anlernen starten und am Gerät das Teach-in-Telegramm auslösen – üblicherweise über die Lerntaste oder den in der Geräteanleitung beschriebenen Vorgang.",
+            "Nach erfolgreichem Empfang die angelegten Werte einmal durch eine Zustandsänderung kontrollieren.",
+        ])
+    else:
+        steps.extend([
+            "Anlernen starten und am Gerät den vom Hersteller beschriebenen Einlernvorgang auslösen.",
+            "Nach dem ersten Telegramm Sender-ID, Profil und Werte kontrollieren.",
+        ])
+    if support != "decoded":
+        steps.append("Dieses Profil ist noch nicht vollständig dekodiert; nach dem Anlernen deshalb die angezeigten Rohdaten prüfen.")
+    item["instructions"] = steps
+    return item
 
 
 def enocean_devices_html(devices, integration_id):
@@ -933,12 +1063,30 @@ def enocean_devices_html(devices, integration_id):
         last_seen = float(device.get("last_seen", 0) or 0)
         last_text = dt.datetime.fromtimestamp(last_seen).strftime("%d.%m.%Y %H:%M:%S") if last_seen else "Noch kein Datentelegramm"
         rssi = device.get("rssi")
+        control_mode = str(device.get("control_mode", ""))
+        profile_id = str(device.get("profile_id") or device.get("eep", ""))
+        control_text = "Virtueller F6-Richtungstaster · keine bidirektionale Rückmeldung" if control_mode == "rps_direction" else "GFVS-Direktsteuerung · bidirektional" if profile_id == "A5-3F-7F" else "Empfangsgerät"
+        bidirectional_text = ""
+        if profile_id == "A5-3F-7F" and control_mode != "rps_direction":
+            verified = bool(device.get("bidirectional_verified"))
+            confirmation_rssi = device.get("confirmation_rssi")
+            bidirectional_text = f'<small>{"Bidirektional bestätigt" if verified else "Noch keine Aktorbestätigung empfangen"}{f" · {confirmation_rssi} dBm" if confirmation_rssi is not None else ""}</small>'
+        test_controls = ""
+        if str(device.get("eep", "")) == "A5-3F-7F":
+            test_controls = f'''<div><small>Direkter Sendetest – damit lässt sich die iOS-App als Fehlerquelle ausschließen:</small><div class="actions">{''.join(f'<form method="post" action="/setup/enocean/action" class="token-form"><input type="hidden" name="current_token"><input type="hidden" name="integration_id" value="{escape(integration_id)}"><input type="hidden" name="action_id" value="test_device"><input type="hidden" name="sender_id" value="{escape(sender_id)}"><input type="hidden" name="command" value="{command}"><button type="submit" class="secondary">{label}</button></form>' for command, label in ((0, '▲ Rauf testen'), (2, '■ Stopp testen'), (1, '▼ Runter testen')))}</div></div>'''
+            if control_mode == "rps_direction":
+                pair = str(device.get("rocker_pair", "A")).upper()
+                teach_buttons = ''.join(
+                    f'<form method="post" action="/setup/enocean/action" class="token-form"><input type="hidden" name="current_token"><input type="hidden" name="integration_id" value="{escape(integration_id)}"><input type="hidden" name="action_id" value="teach_device"><input type="hidden" name="sender_id" value="{escape(sender_id)}"><input type="hidden" name="rocker_pair" value="{candidate}"><button type="submit" class="secondary">Wippe {candidate} 4× anlernen</button></form>'
+                    for candidate in ("A", "B")
+                )
+                test_controls += f'<div><small>FJ62 zuerst in Lernbereitschaft bringen, dann genau einen Versuch starten. Aktuell gespeichert: Wippe {escape(pair)}.</small><div class="actions">{teach_buttons}</div></div>'
         device_cards.append(f'''
 <article class="device"><form method="post" action="/setup/enocean/action" class="token-form">
 <input type="hidden" name="current_token"><input type="hidden" name="integration_id" value="{escape(integration_id)}"><input type="hidden" name="action_id" value="update_device"><input type="hidden" name="sender_id" value="{escape(sender_id)}">
 <div class="device-head"><div><b>{escape(str(device.get('name') or sender_id))}</b><small>Sender {escape(sender_id)} · {escape(str(rssi if rssi is not None else '?'))} dBm</small></div><code>{escape(str(device.get('eep', 'Unbekannt')))}</code></div>
 <div class="device-grid"><label>Anzeigename<input name="name" value="{escape(str(device.get('name', '')))}" maxlength="120"></label><label>Geräteprofil<input name="eep" list="eepProfiles" value="{escape(str(device.get('profile_id') or device.get('eep', '')))}" required></label></div>
-<small>Zuletzt empfangen: {escape(last_text)} · Rohdaten: {escape(str(device.get('raw', '—')))}</small><div class="buttons"><button type="submit">Änderungen speichern</button></div></form>
+<small>Profil: {escape(profile_id)} · Steuerung: {escape(control_text)}</small>{bidirectional_text}<small>Zuletzt empfangen: {escape(last_text)} · Rohdaten: {escape(str(device.get('raw', '—')))}</small><div class="buttons"><button type="submit">Änderungen speichern</button></div></form>{test_controls}
 <form method="post" action="/setup/enocean/action" class="token-form delete-form"><input type="hidden" name="current_token"><input type="hidden" name="integration_id" value="{escape(integration_id)}"><input type="hidden" name="action_id" value="delete_device"><input type="hidden" name="sender_id" value="{escape(sender_id)}"><button class="danger" type="submit">Gerät löschen</button></form></article>''')
     return "".join(device_cards) or '<p class="muted">Noch keine Geräte angelernt. Anlernmodus starten und anschließend den Sensor oder Taster betätigen.</p>'
 
@@ -966,7 +1114,7 @@ def enocean_setup_html(selected_integration="", message="", error="", authentica
     profile_options = "".join(f'<option value="{escape(item["id"])}">{escape(item["name"])}</option>' for item in profiles)
     selected_learning_eep = str((state or {}).get("learning_profile_id") or (state or {}).get("learning_eep", "") or "")
     learning_profile_options = '<option value="">Profil auswählen …</option>' + "".join(
-        f'<option value="{escape(item["id"])}" data-search="{escape(" ".join(str(item.get(key, "")) for key in ("id", "eep", "name", "category", "examples")).casefold())}" {"selected" if item["id"] == selected_learning_eep else ""}>{escape(item["id"])} · {escape(item["name"])} · {escape(item.get("examples", ""))}</option>'
+        f'<option value="{escape(item["id"])}" data-search="{escape(" ".join(str(item.get(key, "")) for key in ("id", "eep", "name", "category", "examples")).casefold())}" data-profile-name="{escape(str(item.get("name", item["id"])))}" data-instructions="{escape(json.dumps(item.get("instructions", []), ensure_ascii=False, separators=(",", ":")))}" {"selected" if item["id"] == selected_learning_eep else ""}>{escape(item["id"])} · {escape(item["name"])} · {escape(item.get("examples", ""))}</option>'
         for item in profiles
     )
     selected_id = selected["id"] if selected else ""
@@ -980,13 +1128,13 @@ def enocean_setup_html(selected_integration="", message="", error="", authentica
         if integrations else '<p class="error">Noch keine EnOcean-Integration in der App angelegt.</p>'
     )
     return f'''<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EnOcean · SmartHomeBoard</title><style>
-:root{{--bg:#edf2f7;--card:#fff;--text:#172033;--muted:#657086;--accent:#1677ff;--ok:#16834b;--bad:#b42318;--line:#d8e0ea}}@media(prefers-color-scheme:dark){{:root{{--bg:#0c1421;--card:#151f2e;--text:#eef4ff;--muted:#9cabc2;--line:#2b3a50}}}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}main{{max-width:1120px;margin:auto;padding:24px 18px 60px}}header,.device-head,.buttons{{display:flex;align-items:center;justify-content:space-between;gap:12px}}h1{{font-size:26px;margin:0}}h2{{font-size:19px;margin:0 0 14px}}.card,.device{{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;margin-bottom:16px;box-shadow:0 8px 25px #0000000a}}.devices{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.device{{margin:0;display:grid;gap:12px}}.device form{{display:grid;gap:12px}}.device-grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}label{{display:grid;gap:7px;font-weight:650}}input,select{{width:100%;border:1px solid var(--line);border-radius:11px;padding:11px;font:inherit;color:var(--text);background:var(--bg)}}button{{border:0;border-radius:11px;padding:12px 16px;background:var(--accent);color:white;font-weight:750;cursor:pointer}}button.secondary{{background:#64748b}}button.danger{{background:#b42318;width:100%}}small,.muted{{display:block;color:var(--muted);margin-top:4px}}code{{font-family:ui-monospace,SFMono-Regular,monospace}}.actions{{display:flex;gap:10px;flex-wrap:wrap}}.success,.error{{padding:13px;border-radius:12px;margin-bottom:14px}}.success{{background:#16a34a20;color:var(--ok)}}.error{{background:#ef444420;color:var(--bad)}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}}.badge{{display:inline-block;padding:4px 8px;border-radius:999px;background:#64748b22}}.badge.decoded{{color:var(--ok);background:#16a34a20}}.badge.raw{{color:#b36b00;background:#f59e0b20}}a{{color:var(--accent);font-weight:700;text-decoration:none}}@media(max-width:760px){{.devices,.device-grid{{grid-template-columns:1fr}}table{{font-size:13px}}th:nth-child(3),td:nth-child(3),th:nth-child(4),td:nth-child(4){{display:none}}}}
+:root{{--bg:#edf2f7;--card:#fff;--text:#172033;--muted:#657086;--accent:#1677ff;--ok:#16834b;--bad:#b42318;--line:#d8e0ea}}@media(prefers-color-scheme:dark){{:root{{--bg:#0c1421;--card:#151f2e;--text:#eef4ff;--muted:#9cabc2;--line:#2b3a50}}}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}main{{max-width:1120px;margin:auto;padding:24px 18px 60px}}header,.device-head,.buttons{{display:flex;align-items:center;justify-content:space-between;gap:12px}}h1{{font-size:26px;margin:0}}h2{{font-size:19px;margin:0 0 14px}}.card,.device{{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;margin-bottom:16px;box-shadow:0 8px 25px #0000000a}}.devices{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}.device{{margin:0;display:grid;gap:12px}}.device form{{display:grid;gap:12px}}.device-grid{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}label{{display:grid;gap:7px;font-weight:650}}input,select{{width:100%;border:1px solid var(--line);border-radius:11px;padding:11px;font:inherit;color:var(--text);background:var(--bg)}}button{{border:0;border-radius:11px;padding:12px 16px;background:var(--accent);color:white;font-weight:750;cursor:pointer}}button.secondary{{background:#64748b}}button.danger{{background:#b42318;width:100%}}small,.muted{{display:block;color:var(--muted);margin-top:4px}}code{{font-family:ui-monospace,SFMono-Regular,monospace}}.actions{{display:flex;gap:10px;flex-wrap:wrap}}.instructions{{margin:4px 0;padding:15px 18px;border:1px solid #1677ff55;border-radius:14px;background:#1677ff0b}}.instructions h3{{margin:0 0 9px;font-size:17px}}.instructions ol{{margin:0;padding-left:24px}}.instructions li{{margin:0 0 9px;line-height:1.45}}.instructions li:last-child{{margin-bottom:0}}.success,.error{{padding:13px;border-radius:12px;margin-bottom:14px}}.success{{background:#16a34a20;color:var(--ok)}}.error{{background:#ef444420;color:var(--bad)}}table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}}.badge{{display:inline-block;padding:4px 8px;border-radius:999px;background:#64748b22}}.badge.decoded{{color:var(--ok);background:#16a34a20}}.badge.raw{{color:#b36b00;background:#f59e0b20}}a{{color:var(--accent);font-weight:700;text-decoration:none}}@media(max-width:760px){{.devices,.device-grid{{grid-template-columns:1fr}}table{{font-size:13px}}th:nth-child(3),td:nth-child(3),th:nth-child(4),td:nth-child(4){{display:none}}}}
 </style></head><body><main><header><div><h1>EnOcean-Geräte</h1><div class="muted">Anlernen, benennen, Profil zuordnen und entfernen</div></div><a href="/setup">← Servereinstellungen</a></header>{notice}{warning}
 <section class="card"><h2>Integration</h2>{token_input}{integration_selector}</section>
-<section id="enoceanLive" data-integration-id="{escape(selected_id)}" data-device-revision="{hashlib.sha256(json.dumps(devices, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()}"><div class="card"><h2>Neues Gerät anlernen</h2><p class="muted">Zuerst das Geräteprofil wählen, dann den Lernmodus starten und genau das gewünschte Gerät betätigen. Der erste neue Sender mit passender Telegrammfamilie wird gespeichert; danach endet der Lernmodus automatisch. Bereits gespeicherte Sender-IDs sind gesperrt.</p><form method="post" action="/setup/enocean/action" class="token-form"><input type="hidden" name="current_token"><input type="hidden" name="integration_id" value="{escape(selected_id)}"><input type="hidden" name="action_id" value="start_learning"><label>Profil suchen<input id="learningProfileSearch" type="search" placeholder="z. B. FT55, Einfachwippe, Doppelwippe …" autocomplete="off"></label><label>EnOcean-Profil<select id="learningProfileSelect" name="eep" required>{learning_profile_options}</select><small>FT55 Einfachwippe legt „Wippe 1“ an; FT55 Doppelwippe legt „Wippe 1“ und „Wippe 2“ als getrennte Instanzen an.</small></label><label>Anzeigename (optional)<input name="name" maxlength="120" placeholder="z. B. Taster Wohnzimmer"></label><button type="submit" {'disabled' if not selected else ''}>Anlernen starten</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/setup/enocean/action" class="token-form"><input type="hidden" name="current_token"><input type="hidden" name="integration_id" value="{escape(selected_id)}"><input type="hidden" name="action_id" value="stop_learning"><button class="secondary" type="submit" {'disabled' if not selected else ''}>Anlernen beenden</button></form></div><p><b id="enoceanLearningStatus">{f'Anlernmodus aktiv · {escape(selected_learning_eep)} · noch etwa {learning_seconds} Sekunden' if learning_seconds else 'Anlernmodus nicht aktiv'}</b></p></div>
+<section id="enoceanLive" data-integration-id="{escape(selected_id)}" data-device-revision="{hashlib.sha256(json.dumps(devices, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()}"><div class="card"><h2>Neues Gerät anlernen · {len(profiles)} EEP-Profile</h2><p class="muted">Profil suchen und auswählen. Die dazu passende Anleitung erscheint sofort unter der Auswahl und führt Schritt für Schritt durch das Anlernen.</p><form method="post" action="/setup/enocean/action" class="token-form"><input type="hidden" name="current_token"><input type="hidden" name="integration_id" value="{escape(selected_id)}"><input type="hidden" name="action_id" value="start_learning"><label>Profil suchen<input id="learningProfileSearch" type="search" placeholder="z. B. FJ62NP, Rollladen, FT55 oder A5-3F-7F …" autocomplete="off"></label><label>EnOcean-Profil<select id="learningProfileSelect" name="eep" required size="8">{learning_profile_options}</select><small>Die Liste enthält den vollständigen EEP-Katalog. Die Suche filtert sie direkt auf Gerätename, Beispiel, Kategorie oder EEP.</small></label><aside id="learningInstructions" class="instructions" hidden><h3 id="learningInstructionsTitle">Anleitung</h3><ol id="learningInstructionSteps"></ol></aside><label>Anzeigename (optional)<input name="name" maxlength="120" placeholder="z. B. Rollladen Wohnzimmer"></label><button type="submit" {'disabled' if not selected else ''}>Anlernen starten</button></form><div class="actions" style="margin-top:12px"><form method="post" action="/setup/enocean/action" class="token-form"><input type="hidden" name="current_token"><input type="hidden" name="integration_id" value="{escape(selected_id)}"><input type="hidden" name="action_id" value="stop_learning"><button class="secondary" type="submit" {'disabled' if not selected else ''}>Anlernen beenden</button></form></div><p><b id="enoceanLearningStatus">{f'Anlernmodus aktiv · {escape(selected_learning_eep)} · noch etwa {learning_seconds} Sekunden' if learning_seconds else 'Anlernmodus nicht aktiv'}</b></p></div>
 <section><h2>Angelernte Geräte · <span id="enoceanDeviceCount">{len(devices)}</span></h2><datalist id="eepProfiles">{profile_options}</datalist><div id="enoceanDevices" class="devices">{devices_html}</div></section></section>
 <section class="card" style="margin-top:20px"><h2>Verfügbare Geräteprofile · {len(profiles)}</h2><p class="muted">„Dekodiert“ liefert bereits passende Dashboard-Attribute. „Rohdaten“ legt das Gerät an und zeigt Telegramme zur weiteren Profilentwicklung. „Katalog“ ist vorbereitet, benötigt aber insbesondere bei Aktoren noch die sichere Sende- und Anlernlogik.</p><label>Profil oder Eltako-Gerät suchen<input id="profileSearch" type="search" placeholder="z. B. Fenstergriff, FT55, Rauchmelder, FSB14 …"></label><div style="overflow:auto"><table><thead><tr><th>EEP</th><th>Profil und Beispiele</th><th>Kategorie</th><th>Richtung</th><th>Stand</th></tr></thead><tbody id="profileRows">{profile_rows}</tbody></table></div></section>
-</main><script>const token=document.getElementById('apiToken');function bindTokenForms(root=document){{root.querySelectorAll('.token-form:not([data-bound])').forEach(form=>{{form.dataset.bound='1';form.addEventListener('submit',event=>{{form.querySelector('[name=current_token]').value=token?.value||'';if(form.classList.contains('delete-form')&&!confirm('Dieses EnOcean-Gerät wirklich dauerhaft löschen?'))event.preventDefault();}});}});}}bindTokenForms();const search=document.getElementById('profileSearch');search?.addEventListener('input',()=>{{const q=search.value.trim().toLocaleLowerCase();document.querySelectorAll('#profileRows tr').forEach(row=>row.hidden=q&&!row.dataset.search.includes(q));}});const learningSearch=document.getElementById('learningProfileSearch');const learningSelect=document.getElementById('learningProfileSelect');const learningOptions=learningSelect?[...learningSelect.options].map(option=>({{value:option.value,text:option.textContent,search:option.dataset.search||'',selected:option.selected}})):[];function filterLearningProfiles(){{if(!learningSelect)return;const q=learningSearch.value.trim().toLocaleLowerCase();const selected=learningSelect.value;learningSelect.replaceChildren();learningOptions.filter(option=>!option.value||!q||option.search.includes(q)||option.value===selected).forEach(item=>{{const option=document.createElement('option');option.value=item.value;option.textContent=item.text;option.dataset.search=item.search;option.selected=item.value===(selected||learningOptions.find(entry=>entry.selected)?.value||'');learningSelect.append(option);}});}}learningSearch?.addEventListener('input',filterLearningProfiles);const live=document.getElementById('enoceanLive');let enoceanPollTimer=null;async function refreshEnOceanStatus(){{if(!live?.dataset.integrationId||document.hidden)return scheduleEnOceanPoll(2000);try{{const query=new URLSearchParams({{integration_id:live.dataset.integrationId}});const response=await fetch('/setup/enocean/status?'+query,{{cache:'no-store'}});if(!response.ok)throw new Error('HTTP '+response.status);const data=await response.json();const status=document.getElementById('enoceanLearningStatus');status.textContent=data.learning?'Anlernmodus aktiv · '+data.selected_profile+' · noch etwa '+data.learning_seconds+' Sekunden':'Anlernmodus nicht aktiv';document.getElementById('enoceanDeviceCount').textContent=String(data.device_count);if(data.device_revision!==live.dataset.deviceRevision){{const devices=document.getElementById('enoceanDevices');devices.innerHTML=data.devices_html;live.dataset.deviceRevision=data.device_revision;bindTokenForms(devices);}}scheduleEnOceanPoll(data.learning?1000:4000);}}catch(_){{scheduleEnOceanPoll(4000);}}}}function scheduleEnOceanPoll(delay){{clearTimeout(enoceanPollTimer);enoceanPollTimer=setTimeout(refreshEnOceanStatus,delay);}}document.addEventListener('visibilitychange',()=>{{if(!document.hidden)refreshEnOceanStatus();}});scheduleEnOceanPoll({1000 if selected else 4000});</script></body></html>'''
+</main><script>const token=document.getElementById('apiToken');function bindTokenForms(root=document){{root.querySelectorAll('.token-form:not([data-bound])').forEach(form=>{{form.dataset.bound='1';form.addEventListener('submit',event=>{{form.querySelector('[name=current_token]').value=token?.value||'';if(form.classList.contains('delete-form')&&!confirm('Dieses EnOcean-Gerät wirklich dauerhaft löschen?'))event.preventDefault();}});}});}}bindTokenForms();const search=document.getElementById('profileSearch');search?.addEventListener('input',()=>{{const q=search.value.trim().toLocaleLowerCase();document.querySelectorAll('#profileRows tr').forEach(row=>row.hidden=q&&!row.dataset.search.includes(q));}});const learningSearch=document.getElementById('learningProfileSearch');const learningSelect=document.getElementById('learningProfileSelect');const instructionPanel=document.getElementById('learningInstructions');const instructionTitle=document.getElementById('learningInstructionsTitle');const instructionSteps=document.getElementById('learningInstructionSteps');const learningOptions=learningSelect?[...learningSelect.options].map(option=>({{value:option.value,text:option.textContent,search:option.dataset.search||'',profileName:option.dataset.profileName||'',instructions:option.dataset.instructions||'[]',selected:option.selected}})):[];function renderLearningInstructions(){{const option=learningSelect?.selectedOptions[0];if(!option?.value){{instructionPanel.hidden=true;instructionSteps.replaceChildren();return;}}let steps=[];try{{steps=JSON.parse(option.dataset.instructions||'[]');}}catch(_){{steps=[];}}instructionTitle.textContent='Anleitung · '+(option.dataset.profileName||option.value);instructionSteps.replaceChildren(...steps.map(step=>{{const item=document.createElement('li');item.textContent=step;return item;}}));instructionPanel.hidden=!steps.length;}}function filterLearningProfiles(){{if(!learningSelect)return;const q=learningSearch.value.trim().toLocaleLowerCase();const selected=learningSelect.value;learningSelect.replaceChildren();learningOptions.filter(option=>!option.value||!q||option.search.includes(q)||option.value===selected).forEach(item=>{{const option=document.createElement('option');option.value=item.value;option.textContent=item.text;option.dataset.search=item.search;option.dataset.profileName=item.profileName;option.dataset.instructions=item.instructions;option.selected=item.value===(selected||learningOptions.find(entry=>entry.selected)?.value||'');learningSelect.append(option);}});renderLearningInstructions();}}learningSearch?.addEventListener('input',filterLearningProfiles);learningSelect?.addEventListener('change',renderLearningInstructions);renderLearningInstructions();const live=document.getElementById('enoceanLive');let enoceanPollTimer=null;async function refreshEnOceanStatus(){{if(!live?.dataset.integrationId||document.hidden)return scheduleEnOceanPoll(2000);try{{const query=new URLSearchParams({{integration_id:live.dataset.integrationId}});const response=await fetch('/setup/enocean/status?'+query,{{cache:'no-store'}});if(!response.ok)throw new Error('HTTP '+response.status);const data=await response.json();const status=document.getElementById('enoceanLearningStatus');status.textContent=data.learning?'Anlernmodus aktiv · '+data.selected_profile+' · noch etwa '+data.learning_seconds+' Sekunden':'Anlernmodus nicht aktiv';document.getElementById('enoceanDeviceCount').textContent=String(data.device_count);if(data.device_revision!==live.dataset.deviceRevision){{const devices=document.getElementById('enoceanDevices');devices.innerHTML=data.devices_html;live.dataset.deviceRevision=data.device_revision;bindTokenForms(devices);}}scheduleEnOceanPoll(data.learning?1000:4000);}}catch(_){{scheduleEnOceanPoll(4000);}}}}function scheduleEnOceanPoll(delay){{clearTimeout(enoceanPollTimer);enoceanPollTimer=setTimeout(refreshEnOceanStatus,delay);}}document.addEventListener('visibilitychange',()=>{{if(!document.hidden)refreshEnOceanStatus();}});scheduleEnOceanPoll({1000 if selected else 4000});</script></body></html>'''
 
 
 def modbus_profile_records():
@@ -1554,19 +1702,44 @@ async def perform_integration_action(integration_id: str, action_id: str, comman
 
 @app.get("/api/v1/nodes")
 async def nodes():
-    return {"sequence": runtime.sequence, "nodes": database.nodes()}
+    return {"sequence": runtime.sequence, "nodes": runtime.visible_nodes()}
 
 
 @app.put("/api/v1/nodes/{node_id}/attributes/{attribute_id}")
-async def set_attribute(node_id: int, attribute_id: int, command: AttributeCommand):
+async def set_attribute(node_id: int, attribute_id: int, command: AttributeCommand, request: Request):
+    requested_source = request.headers.get("x-shb-source", "server_api").strip().lower()
+    source = requested_source if requested_source in {"ios_app", "web_portal", "server_api"} else "server_api"
+    client_name = request.headers.get("x-shb-client-name", "").strip()[:160]
+    client_id = request.headers.get("x-shb-client-id", "").strip()[:200]
     try:
-        await runtime.set_value(node_id, attribute_id, command.value)
+        await runtime.set_value(
+            node_id, attribute_id, command.value,
+            source=source,
+            source_detail=client_name or request.headers.get("user-agent", "API-Client")[:160],
+            client_id=client_id,
+            metadata={"remote_address": request.client.host if request.client else ""},
+        )
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error))
     except Exception as error:
         logging.getLogger("smarthomeboard.command").warning("Gerätebefehl fehlgeschlagen: %s", error)
         raise HTTPException(status_code=502, detail=str(error))
     return {"ok": True}
+
+
+@app.get("/api/v1/audit/events")
+async def command_audit_events(
+    limit: int = Query(default=250, ge=1, le=2000),
+    node_id: Optional[int] = Query(default=None),
+    integration_module: str = Query(default="", max_length=80),
+    event_kind: str = Query(default="", max_length=40),
+    source: str = Query(default="", max_length=40),
+    status: str = Query(default="", max_length=40),
+):
+    return {"events": database.command_audit(
+        limit=limit, node_id=node_id, integration_module=integration_module,
+        event_kind=event_kind, source=source, status=status,
+    )}
 
 
 @app.get("/api/v1/nodes/{node_id}/attributes/{attribute_id}/history")
@@ -1613,6 +1786,37 @@ async def automations():
 @app.get("/api/v1/automations/status")
 async def automation_status():
     return automation_engine.status()
+
+
+@app.get("/api/v1/device-groups")
+async def device_groups():
+    return {"groups": database.setting("device_groups", []) or []}
+
+
+@app.post("/api/v1/device-groups")
+async def save_device_group(payload: DeviceGroupPayload):
+    groups = database.setting("device_groups", []) or []
+    group_id = payload.id.strip() or str(uuid.uuid4())
+    available_ids = {int(node.get("id", 0)) for node in database.nodes()}
+    node_ids = list(dict.fromkeys(int(item) for item in payload.node_ids if int(item) in available_ids))
+    group = {"id": group_id, "name": payload.name.strip(), "node_ids": node_ids}
+    groups = [item for item in groups if str(item.get("id")) != group_id] + [group]
+    database.set_setting("device_groups", groups)
+    return group
+
+
+@app.delete("/api/v1/device-groups/{group_id}")
+async def delete_device_group(group_id: str):
+    groups = database.setting("device_groups", []) or []
+    remaining = [item for item in groups if str(item.get("id")) != group_id]
+    if len(remaining) == len(groups):
+        raise HTTPException(status_code=404, detail="Gerätegruppe nicht gefunden")
+    used = [rule.get("name", "Automation") for rule in automation_engine.rules
+            if any(str(item.get("groupID")) == group_id for item in rule.get("triggers", []) + rule.get("conditions", []))]
+    if used:
+        raise HTTPException(status_code=409, detail=f"Gerätegruppe wird noch verwendet: {', '.join(used)}")
+    database.set_setting("device_groups", remaining)
+    return {"ok": True}
 
 
 @app.delete("/api/v1/automations/{rule_id}")
@@ -1672,7 +1876,7 @@ async def events(websocket: WebSocket, token: str = ""):
         return
     await websocket.accept()
     runtime.websockets.add(websocket)
-    await websocket.send_json({"type": "snapshot", "sequence": runtime.sequence, "nodes": database.nodes()})
+    await websocket.send_json({"type": "snapshot", "sequence": runtime.sequence, "nodes": runtime.visible_nodes()})
     try:
         while True:
             await websocket.receive_text()

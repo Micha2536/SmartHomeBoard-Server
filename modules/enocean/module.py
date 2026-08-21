@@ -17,6 +17,9 @@ from pathlib import Path
 log = logging.getLogger("smarthomeboard.enocean")
 
 PACKET_RADIO_ERP1 = 0x01
+PACKET_RESPONSE = 0x02
+PACKET_COMMON_COMMAND = 0x05
+COMMON_COMMAND_READ_ID_BASE = 0x08
 RORG_RPS = 0xF6
 RORG_1BS = 0xD5
 RORG_4BS = 0xA5
@@ -26,12 +29,12 @@ def manifest():
     return {
         "id": "enocean",
         "name": "EnOcean USB300",
-        "version": "1.3.0",
+        "version": "1.7.0",
         "icon": "antenna.radiowaves.left.and.right",
         "description": (
             "Lokales EnOcean-Backend über ESP3. Lernt Sender dauerhaft an und "
-            "bildet Kontakte, Fenstergriffe, Taster sowie verbreitete Klima-, "
-            "Helligkeits- und Bewegungssensoren auf Dashboard-Geräte ab."
+            "bildet Kontakte, Fenstergriffe, Taster, Sensoren und unterstützte "
+            "bidirektionale Eltako-Rollladenaktoren auf Dashboard-Geräte ab."
         ),
         "supportsDiscovery": True,
         "supportsMultipleInstances": False,
@@ -48,14 +51,19 @@ def manifest():
             {
                 "key": "default_f6_eep",
                 "type": "select",
-                "title": "Standardprofil für batterielose F6-Sender",
+                "title": "Standardprofil unbekannter F6-Empfangstelegramme (kein Anlernen)",
                 "default": "F6-02-01",
                 "options": [
                     {"value": "F6-02-01", "label": "Wandtaster · F6-02-01"},
                     {"value": "F6-02-02", "label": "Wandtaster invertiert · F6-02-02"},
                     {"value": "F6-10-00", "label": "Fenstergriff · F6-10-00"},
                 ],
-                "help": "F6-Telegramme übertragen ihr EEP nicht. Das Profil gilt beim Anlernen; Ausnahmen können unten zugeordnet werden.",
+                "help": "Nur für unbekannte F6-Telegramme. Die vollständige, durchsuchbare EEP-Auswahl befindet sich unter EnOcean verwalten.",
+            },
+            {
+                "key": "roller_runtime_seconds", "type": "integer",
+                "title": "Rollladen-Laufzeit", "default": 60, "minimum": 1, "maximum": 255,
+                "help": "Volle Fahrzeit in Sekunden für A5-3F-7F-Aktoren wie den Eltako FJ62NP-230V.",
             },
             {
                 "key": "eep_overrides",
@@ -66,10 +74,7 @@ def manifest():
                 "help": "Optional eine Zeile je Sender: achtstellige Sender-ID=EEP, beispielsweise 019ADAA0=F6-10-00.",
             },
         ],
-        "actions": [
-            {"id": "start_learning", "title": "60 Sekunden anlernen", "icon": "dot.radiowaves.left.and.right"},
-            {"id": "stop_learning", "title": "Anlernen beenden", "icon": "stop.circle"},
-        ],
+        "actions": [],
     }
 
 
@@ -123,6 +128,10 @@ class EnOceanAdapter:
         self.configuration = configuration
         self.context = context
         self.serial = None
+        self.base_id = None
+        self.write_lock = None
+        self.response_waiter = None
+        self.actor_confirmation_waiters = {}
         self.reader_task = None
         self.learning_task = None
         self.learning_until = 0.0
@@ -130,6 +139,7 @@ class EnOceanAdapter:
         self.learning_profile_id = ""
         self.learning_variant = ""
         self.learning_name = ""
+        self.learning_tx_offset = 0
         self.parser = ESP3StreamParser()
         state = context.load_state({"devices": {}}) or {"devices": {}}
         self.devices = state.get("devices", {}) if isinstance(state, dict) else {}
@@ -143,6 +153,7 @@ class EnOceanAdapter:
             import serial
             self.serial = serial.Serial(port=port, baudrate=57600, bytesize=8, parity="N", stopbits=1, timeout=1)
             self.serial.reset_input_buffer()
+            self.base_id = await asyncio.to_thread(self._read_base_id)
         except ImportError as error:
             raise RuntimeError("Python-Paket pyserial fehlt; Container bitte neu bauen") from error
         except Exception as error:
@@ -173,6 +184,10 @@ class EnOceanAdapter:
             with contextlib.suppress(Exception):
                 self.serial.close()
         self.serial = None
+        for waiter in self.actor_confirmation_waiters.values():
+            if not waiter.done():
+                waiter.cancel()
+        self.actor_confirmation_waiters.clear()
 
     async def action(self, action_id, payload):
         if action_id == "get_management":
@@ -189,6 +204,10 @@ class EnOceanAdapter:
             self.learning_profile_id = profile_id
             self.learning_variant = str(profile.get("variant", ""))
             self.learning_name = str(payload.get("name", "")).strip()[:120]
+            control_mode = str(profile.get("control_mode", ""))
+            teach_payload = str(profile.get("teach_payload", "")).replace(" ", "")
+            if teach_payload or control_mode == "rps_direction":
+                self.learning_tx_offset = self._next_tx_offset()
             self._save_state(
                 learning_until=time.time() + seconds,
                 learning_eep=eep,
@@ -197,11 +216,74 @@ class EnOceanAdapter:
             if self.learning_task:
                 self.learning_task.cancel()
             self.learning_task = asyncio.create_task(self._finish_learning_after(seconds))
-            await self.context.set_status(f"Anlernmodus · {eep} · noch {seconds} s")
+            if control_mode == "rps_direction":
+                try:
+                    await self._teach_rps_direction_pushbutton(profile)
+                except Exception:
+                    await self._stop_learning()
+                    raise
+                sender_id = self._sender_id_for_offset(self.learning_tx_offset)
+                device = {
+                    "eep": eep,
+                    "profile_id": profile_id,
+                    "variant": "",
+                    "control_mode": control_mode,
+                    "rocker_pair": str(profile.get("rocker_pair", "A")).strip().upper(),
+                    "tx_offset": self.learning_tx_offset,
+                    "name": self.learning_name or "Eltako Rollladen",
+                    "manufacturer": 0x00D,
+                    "rssi": None,
+                    "raw": "00",
+                    "values": {"shutter_command": 2, "confirmation": "Virtueller Richtungstaster"},
+                    "last_seen": time.time(),
+                }
+                self.devices[sender_id] = device
+                self._save_state()
+                await self._publish(sender_id, device)
+                await self._stop_learning()
+                await self.context.set_status(f"Richtungstaster angelernt · {sender_id}")
+            elif teach_payload:
+                try:
+                    await self._send_4bs(bytes.fromhex(teach_payload), sender_offset=self.learning_tx_offset)
+                except Exception:
+                    await self._stop_learning()
+                    raise
+            if time.monotonic() < self.learning_until:
+                await self.context.set_status(f"Anlernmodus · {eep} · noch {seconds} s")
             return self._management_state()
         if action_id == "stop_learning":
             await self._stop_learning()
             return self._management_state()
+        if action_id == "test_device":
+            sender_id = normalize_sender_id(payload.get("sender_id"))
+            device = self.devices.get(sender_id)
+            if not device:
+                raise KeyError("EnOcean-Gerät wurde nicht gefunden")
+            command_value = int(payload.get("command", 2))
+            node_id = self.context.stable_node_id(sender_id)
+            await self.set_value(node_id, self.context.attribute_id(node_id, 2), command_value)
+            return {**self._management_state(), "message": "Tastertelegramm wurde vom USB300 bestätigt."}
+        if action_id == "teach_device":
+            sender_id = normalize_sender_id(payload.get("sender_id"))
+            device = self.devices.get(sender_id)
+            if not device or str(device.get("control_mode", "")) != "rps_direction":
+                raise ValueError("Nur ein virtueller EnOcean-Richtungstaster kann erneut angelernt werden")
+            rocker_pair = str(payload.get("rocker_pair", "A")).strip().upper()
+            if rocker_pair not in {"A", "B"}:
+                raise ValueError("Die EnOcean-Wippe muss A oder B sein")
+            await self._teach_rps_direction_pushbutton(
+                {"teach_repetitions": 4, "rocker_pair": rocker_pair},
+                sender_offset=int(device.get("tx_offset", 0) or 0),
+            )
+            device["rocker_pair"] = rocker_pair
+            device["last_seen"] = time.time()
+            self.devices[sender_id] = device
+            self._save_state()
+            await self._publish(sender_id, device)
+            return {
+                **self._management_state(),
+                "message": f"Vier Tastendrücke der EnOcean-Wippe {rocker_pair} wurden gesendet.",
+            }
         if action_id == "update_device":
             sender_id = normalize_sender_id(payload.get("sender_id"))
             device = self.devices.get(sender_id)
@@ -218,6 +300,7 @@ class EnOceanAdapter:
             device["eep"] = eep
             device["profile_id"] = profile_id
             device["variant"] = str(profile.get("variant", ""))
+            device["control_mode"] = str(profile.get("control_mode", ""))
             raw = bytes.fromhex(str(device.get("raw", "")))
             if raw:
                 device["values"] = decode_eep(eep, raw, device["variant"])
@@ -236,7 +319,150 @@ class EnOceanAdapter:
         raise ValueError("Unbekannte EnOcean-Modulaktion")
 
     async def set_value(self, node_id, attribute_id, value):
-        raise ValueError("Die erste EnOcean-Version unterstützt zunächst nur empfangende Geräte")
+        match = next(
+            ((sender_id, device) for sender_id, device in self.devices.items()
+             if self.context.stable_node_id(sender_id) == int(node_id)),
+            None,
+        )
+        if not match:
+            raise ValueError("Das EnOcean-Gerät wurde nicht gefunden")
+        sender_id, device = match
+        if normalize_eep(device.get("eep")) != "A5-3F-7F":
+            raise ValueError("Dieses EnOcean-Gerät unterstützt noch keine Serversteuerung")
+        direction_id = self.context.attribute_id(int(node_id), 2)
+        if int(attribute_id) != direction_id:
+            raise ValueError("Dieses EnOcean-Attribut ist nicht schreibbar")
+        command_value = int(round(float(value)))
+        command = {0: 0x01, 1: 0x02, 2: 0x00}.get(command_value)
+        if command is None:
+            raise ValueError("Rollladenbefehl muss Öffnen, Schließen oder Stop sein")
+        runtime = 0 if command == 0 else max(1, min(255, int(float(
+            self.configuration.get("roller_runtime_seconds", 60)
+        ))))
+        sender_offset = int(device.get("tx_offset", 0) or 0)
+        if str(device.get("control_mode", "")) == "rps_direction":
+            up_rocker, down_rocker = self._rps_direction_payloads(device)
+            if command == 0:
+                current = int(dict(device.get("values", {})).get("shutter_command", 2) or 2)
+                rocker = down_rocker if current == 4 else up_rocker
+            else:
+                rocker = up_rocker if command == 0x01 else down_rocker
+            await self._send_rps_click(rocker, sender_offset=sender_offset)
+        else:
+            await self._send_4bs(
+                bytes([0x00, runtime, command, 0x08]),
+                sender_offset=sender_offset,
+            )
+        values = dict(device.get("values", {}))
+        values.update({"shutter_command": {0: 3, 1: 4, 2: 2}[command_value], "runtime_seconds": runtime})
+        device["values"] = values
+        device["last_seen"] = time.time()
+        self.devices[sender_id] = device
+        self._save_state()
+        await self._publish(sender_id, device)
+
+    def _read_base_id(self):
+        """Read the USB300 base ID before the background reader owns the port."""
+        self.serial.write(encode_esp3_packet(PACKET_COMMON_COMMAND, bytes([COMMON_COMMAND_READ_ID_BASE])))
+        parser = ESP3StreamParser()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            for packet_type, data, _optional in parser.feed(self.serial.read(512)):
+                if packet_type == PACKET_RESPONSE and len(data) >= 5 and data[0] == 0:
+                    return int.from_bytes(data[1:5], "big")
+        raise TimeoutError("Die EnOcean-Basis-ID des USB300 konnte nicht gelesen werden")
+
+    def _next_tx_offset(self):
+        used = {
+            int(device.get("tx_offset")) for device in self.devices.values()
+            if device.get("tx_offset") is not None and normalize_eep(device.get("eep")) == "A5-3F-7F"
+        }
+        offset = next((value for value in range(128) if value not in used), None)
+        if offset is None:
+            raise RuntimeError("Der USB300-Sender-ID-Bereich für EnOcean-Aktoren ist vollständig belegt")
+        return offset
+
+    def _sender_id_for_offset(self, sender_offset):
+        if self.base_id is None:
+            raise ConnectionError("Der EnOcean USB300 ist nicht sendebereit")
+        return f"{(int(self.base_id) + int(sender_offset)) & 0xFFFFFFFF:08X}"
+
+    async def _teach_rps_direction_pushbutton(self, profile, sender_offset=None):
+        repetitions = max(1, min(8, int(profile.get("teach_repetitions", 4) or 4)))
+        rocker_pair = str(profile.get("rocker_pair", "A")).strip().upper()
+        up_rocker = 0x30 if rocker_pair != "B" else 0x70
+        if sender_offset is None:
+            sender_offset = self.learning_tx_offset
+        for index in range(repetitions):
+            await self._send_rps_click(up_rocker, sender_offset=sender_offset)
+            if index + 1 < repetitions:
+                await asyncio.sleep(0.30)
+
+    @staticmethod
+    def _rps_direction_payloads(device):
+        """Return up/down RPS payloads for the rocker pair used at teach-in."""
+        pair = str(device.get("rocker_pair", "A")).strip().upper()
+        return (0x70, 0x50) if pair == "B" else (0x30, 0x10)
+
+    async def _send_rps_click(self, rocker, sender_offset):
+        await self._send_rps(rocker, sender_offset=sender_offset, status=0x30)
+        await asyncio.sleep(0.12)
+        await self._send_rps(0x00, sender_offset=sender_offset, status=0x20)
+
+    async def _send_rps(self, payload, destination=0xFFFFFFFF, sender_offset=None, status=0x30):
+        if not self.serial or self.base_id is None:
+            raise ConnectionError("Der EnOcean USB300 ist nicht sendebereit")
+        if sender_offset is None:
+            sender_offset = self.configuration.get("sender_id_offset", 0)
+        offset = max(0, min(127, int(float(sender_offset))))
+        sender_id = (int(self.base_id) + offset) & 0xFFFFFFFF
+        data = bytes([RORG_RPS, int(payload) & 0xFF]) + sender_id.to_bytes(4, "big") + bytes([int(status) & 0xFF])
+        optional = bytes([0x03]) + int(destination).to_bytes(4, "big") + bytes([0xFF, 0x00])
+        packet = encode_esp3_packet(PACKET_RADIO_ERP1, data, optional)
+        await self._write_radio_packet(packet, "EnOcean-Tastertelegramm")
+
+    async def _send_4bs(self, payload, destination=0xFFFFFFFF, sender_offset=None):
+        if not self.serial or self.base_id is None:
+            raise ConnectionError("Der EnOcean USB300 ist nicht sendebereit")
+        if len(payload) != 4:
+            raise ValueError("Ein 4BS-Telegramm benötigt genau vier Datenbytes")
+        if sender_offset is None:
+            sender_offset = self.configuration.get("sender_id_offset", 0)
+        if sender_offset is None:
+            raise RuntimeError("Für diesen EnOcean-Aktor ist keine freie USB300-Sender-ID mehr verfügbar")
+        offset = max(0, min(127, int(float(sender_offset))))
+        sender_id = (int(self.base_id) + offset) & 0xFFFFFFFF
+        data = bytes([RORG_4BS]) + bytes(payload) + sender_id.to_bytes(4, "big") + bytes([0x00])
+        optional = bytes([0x03]) + int(destination).to_bytes(4, "big") + bytes([0xFF, 0x00])
+        packet = encode_esp3_packet(PACKET_RADIO_ERP1, data, optional)
+        await self._write_radio_packet(packet, "EnOcean-Telegramm")
+
+    async def _write_radio_packet(self, packet, label):
+        if self.write_lock is None:
+            self.write_lock = asyncio.Lock()
+        async with self.write_lock:
+            loop = asyncio.get_running_loop()
+            wait_for_response = bool(self.reader_task and not self.reader_task.done())
+            waiter = loop.create_future() if wait_for_response else None
+            self.response_waiter = waiter
+            try:
+                written = await asyncio.to_thread(self.serial.write, packet)
+                if written != len(packet):
+                    raise ConnectionError(f"Das {label} wurde nicht vollständig an den USB300 übertragen")
+                if waiter is not None:
+                    try:
+                        response = await asyncio.wait_for(waiter, timeout=1.25)
+                    except asyncio.TimeoutError as error:
+                        raise ConnectionError(f"Der USB300 hat das {label} nicht bestätigt") from error
+                    return_code = response[0] if response else 0xFF
+                    if return_code != 0:
+                        messages = {1: "Fehler", 2: "nicht unterstützt", 3: "ungültige Parameter", 4: "nicht erlaubt"}
+                        raise ConnectionError(
+                            f"Der USB300 hat das {label} abgelehnt: {messages.get(return_code, f'Code {return_code}') }"
+                        )
+            finally:
+                if self.response_waiter is waiter:
+                    self.response_waiter = None
 
     async def _finish_learning_after(self, seconds):
         try:
@@ -251,6 +477,7 @@ class EnOceanAdapter:
         self.learning_profile_id = ""
         self.learning_variant = ""
         self.learning_name = ""
+        self.learning_tx_offset = 0
         self._save_state(learning_until=0, learning_eep="", learning_profile_id="")
         if self.learning_task and self.learning_task is not asyncio.current_task():
             self.learning_task.cancel()
@@ -264,6 +491,8 @@ class EnOceanAdapter:
                 for packet_type, data, optional in self.parser.feed(chunk):
                     if packet_type == PACKET_RADIO_ERP1:
                         await self._handle_radio(data, optional)
+                    elif packet_type == PACKET_RESPONSE and self.response_waiter and not self.response_waiter.done():
+                        self.response_waiter.set_result(bytes(data))
             except asyncio.CancelledError:
                 return
             except Exception as error:
@@ -284,7 +513,7 @@ class EnOceanAdapter:
         # Gespeicherte IDs bleiben für weitere Anlernvorgänge gesperrt. Ihre
         # Zustände werden aktualisiert, sie dürfen aber keinen Lernlauf beenden.
         is_new_learning_device = known is None and learning
-        if is_new_learning_device and not eep_matches_rorg(self.learning_eep, telegram["rorg"]):
+        if is_new_learning_device and not learning_matches_telegram(self.learning_eep, telegram):
             return
 
         eep = known.get("eep") if known else self.learning_eep or self.eep_overrides.get(sender_id)
@@ -295,7 +524,9 @@ class EnOceanAdapter:
             # safely. Keep it visible so the user can add an override.
             eep = f"{telegram['rorg']:02X}-00-00"
 
-        if is_teach_in(telegram["rorg"], telegram["user_data"]):
+        if eep == "A5-3F-7F" and telegram["rorg"] == RORG_RPS:
+            decoded = decode_fj62_confirmation(telegram["user_data"])
+        elif is_teach_in(telegram["rorg"], telegram["user_data"]):
             decoded = dict((known or {}).get("values", {}))
             # A5-14-09 enthält selbst im 4BS-Teach-in-Telegramm bereits die
             # Kontaktbits. So erscheint der ausgewählte Fenstergriff sofort
@@ -315,6 +546,7 @@ class EnOceanAdapter:
             "eep": eep,
             "profile_id": device.get("profile_id") or (self.learning_profile_id if is_new_learning_device else eep),
             "variant": device.get("variant") or (self.learning_variant if is_new_learning_device else profile_variant(eep)),
+            "tx_offset": device.get("tx_offset", self.learning_tx_offset if is_new_learning_device and eep == "A5-3F-7F" else None),
             "name": device.get("name") or (self.learning_name if is_new_learning_device else "") or default_name(eep, sender_id),
             "manufacturer": telegram.get("manufacturer"),
             "rssi": telegram.get("rssi"),
@@ -322,14 +554,61 @@ class EnOceanAdapter:
             "values": decoded,
             "last_seen": time.time(),
         })
+        if eep == "A5-3F-7F" and telegram["rorg"] == RORG_RPS:
+            device["bidirectional_verified"] = True
+            device["confirmation_rssi"] = telegram.get("rssi")
+            device["confirmation_at"] = time.time()
         self.devices[sender_id] = device
         self._save_state()
         await self._publish(sender_id, device)
+        confirmation_waiter = self.actor_confirmation_waiters.pop(sender_id, None)
+        if confirmation_waiter and not confirmation_waiter.done():
+            confirmation_waiter.set_result(dict(telegram))
         if is_new_learning_device:
             # Genau ein bislang unbekannter Sender pro Lernlauf. Das Stoppen
             # geschieht direkt nach dem persistenten Speichern der Sender-ID.
             await self._stop_learning()
-            await self.context.set_status(f"Angelernt · {sender_id} · {eep}")
+            if eep == "A5-3F-7F" and self.reader_task and not self.reader_task.done():
+                asyncio.create_task(self._verify_fj62_bidirectional(sender_id))
+            else:
+                await self.context.set_status(f"Angelernt · {sender_id} · {eep}")
+
+    async def _verify_fj62_bidirectional(self, sender_id):
+        """Request a second actuator confirmation after successful GFVS teach-in."""
+        device = self.devices.get(sender_id)
+        if not device:
+            return
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        previous = self.actor_confirmation_waiters.pop(sender_id, None)
+        if previous and not previous.done():
+            previous.cancel()
+        self.actor_confirmation_waiters[sender_id] = waiter
+        try:
+            # Eltako documents 00000008 as "request confirmation telegram".
+            await self._send_4bs(
+                bytes.fromhex("00000008"),
+                sender_offset=int(device.get("tx_offset", 0) or 0),
+            )
+            telegram = await asyncio.wait_for(waiter, timeout=5.0)
+            current = self.devices.get(sender_id)
+            if current:
+                current["bidirectional_verified"] = True
+                current["confirmation_rssi"] = telegram.get("rssi")
+                current["confirmation_at"] = time.time()
+                self.devices[sender_id] = current
+                self._save_state()
+                await self._publish(sender_id, current)
+            await self.context.set_status(f"Bidirektional bestätigt · {sender_id}")
+        except (asyncio.TimeoutError, ConnectionError) as error:
+            log.warning("FJ62 %s antwortete nicht auf die Bestätigungsabfrage: %s", sender_id, error)
+            await self.context.set_status(
+                f"FJ62 angelernt · Statusabfrage ohne Antwort · {sender_id}",
+                "Funkreichweite und aktivierte Bestätigungstelegramme prüfen",
+            )
+        finally:
+            if self.actor_confirmation_waiters.get(sender_id) is waiter:
+                self.actor_confirmation_waiters.pop(sender_id, None)
 
     def _save_state(self, learning_until=None, learning_eep=None, learning_profile_id=None):
         previous = self.context.load_state({}) or {}
@@ -393,6 +672,12 @@ class EnOceanAdapter:
         if "window_position" in values:
             position = int(values["window_position"])
             add(1, 10, "Fensterposition", position, data={0: "Geschlossen", 1: "Offen", 2: "Gekippt"}.get(position, "Unbekannt"))
+        if eep == "A5-3F-7F":
+            direction = int(values.get("shutter_command", 2))
+            add(2, 135, "Richtung", direction, data={2: "Gestoppt", 3: "Öffnet", 4: "Schließt"}.get(direction, "Unbekannt"))
+            attributes[-1].update({"editable": True, "target_value": 2, "minimum": 0, "maximum": 2, "step_value": 1})
+            if values.get("runtime_seconds") is not None:
+                add(3, 104, "Letzte Fahrzeit", float(values["runtime_seconds"]), "s")
         if eep.startswith("F6-02-"):
             variant = str(device.get("variant") or profile_variant(device.get("profile_id") or eep))
             add(1, 40, "Wippe 1", values.get("rocker_1", 0), data=values.get("rocker_1_name", "Nicht betätigt"), instance=1)
@@ -453,6 +738,13 @@ def crc8(data):
         for _ in range(8):
             value = ((value << 1) ^ 0x07) & 0xFF if value & 0x80 else (value << 1) & 0xFF
     return value
+
+
+def encode_esp3_packet(packet_type, data, optional=b""):
+    data, optional = bytes(data), bytes(optional)
+    header = len(data).to_bytes(2, "big") + bytes([len(optional), int(packet_type)])
+    payload = data + optional
+    return b"\x55" + header + bytes([crc8(header)]) + payload + bytes([crc8(payload)])
 
 
 def parse_radio_erp1(data, optional=b""):
@@ -586,9 +878,36 @@ def decode_eep(eep, payload, variant=""):
         contact = (payload[3] >> 1) & 0x03
         position = {0: 0, 1: 2, 3: 1}.get(contact, 3)
         return {"window_position": position, "supply_voltage": payload[0] * 5.0 / 250.0}
+    if eep == "A5-3F-7F" and len(payload) == 4:
+        runtime = ((payload[0] << 8) | payload[1]) / 10.0 if payload[3] & 0x02 else float(payload[1])
+        command = payload[2]
+        return {
+            "shutter_command": {0x00: 2, 0x01: 3, 0x02: 4}.get(command, 2),
+            "runtime_seconds": runtime,
+            "locked": 1 if payload[3] & 0x04 else 0,
+        }
     if eep in ("A5-30-01", "A5-30-02", "A5-30-03") and len(payload) == 4:
         return {"alarm": 1 if any(payload[:3]) else 0, "raw_value": int.from_bytes(payload, "big")}
     return {"raw_value": int.from_bytes(payload, "big")}
+
+
+def decode_fj62_confirmation(payload):
+    """Decode the RPS confirmation emitted by FJ62 actuators after GFVS teach-in."""
+    value = payload[0] if payload else 0
+    if value in (0x70, 0x30):
+        return {"shutter_command": 3, "confirmation": "Auf"}
+    if value in (0x50, 0x10):
+        return {"shutter_command": 4, "confirmation": "Ab"}
+    return {"shutter_command": 2, "confirmation": "Stopp", "raw_value": value}
+
+
+def learning_matches_telegram(eep, telegram):
+    normalized = normalize_eep(eep)
+    if normalized == "A5-3F-7F":
+        return telegram.get("rorg") == RORG_RPS and bytes(telegram.get("user_data", b""))[:1] in (
+            b"\x70", b"\x30", b"\x50", b"\x10"
+        )
+    return eep_matches_rorg(normalized, telegram.get("rorg"))
 
 
 def temperature_range(eep):
@@ -607,9 +926,44 @@ def normalize_eep(value):
 def profile_catalog():
     try:
         records = json.loads(Path(__file__).with_name("profiles.json").read_text(encoding="utf-8"))
-        return records if isinstance(records, list) else []
+        return [_profile_with_instructions(item) for item in records] if isinstance(records, list) else []
     except (OSError, json.JSONDecodeError):
         return []
+
+
+def _profile_with_instructions(profile):
+    item = dict(profile) if isinstance(profile, dict) else {}
+    configured = item.get("instructions")
+    if isinstance(configured, list) and configured:
+        item["instructions"] = [str(step).strip() for step in configured if str(step).strip()]
+        return item
+    eep = normalize_eep(item.get("eep") or item.get("id"))
+    support = str(item.get("support", "catalog"))
+    steps = [f"Im SHB das Profil {item.get('id', eep)} auswählen und einen eindeutigen Gerätenamen eintragen."]
+    if eep.startswith("F6-"):
+        steps.extend([
+            "Anlernen starten und anschließend die gewünschte Taste beziehungsweise Wippe einmal vollständig drücken und loslassen.",
+            "Prüfen, ob Sender-ID und Empfangsstärke erscheinen und die betätigte Taste im Livezustand wechselt.",
+        ])
+    elif eep == "D5-00-01":
+        steps.extend([
+            "Anlernen starten und den Fenster-/Türkontakt einmal öffnen und wieder schließen; falls vorhanden alternativ die Lerntaste kurz betätigen.",
+            "Prüfen, ob der SHB-Zustand anschließend zwischen Offen und Geschlossen wechselt.",
+        ])
+    elif eep.startswith("A5-"):
+        steps.extend([
+            "Anlernen starten und am Gerät das Teach-in-Telegramm auslösen – üblicherweise über die Lerntaste oder den in der Geräteanleitung beschriebenen Vorgang.",
+            "Nach erfolgreichem Empfang die angelegten Werte einmal durch eine Zustandsänderung kontrollieren.",
+        ])
+    else:
+        steps.extend([
+            "Anlernen starten und am Gerät den vom Hersteller beschriebenen Einlernvorgang auslösen.",
+            "Nach dem ersten Telegramm Sender-ID, Profil und Werte kontrollieren.",
+        ])
+    if support != "decoded":
+        steps.append("Dieses Profil ist noch nicht vollständig dekodiert; nach dem Anlernen deshalb die angezeigten Rohdaten prüfen.")
+    item["instructions"] = steps
+    return item
 
 
 def profile_ids():
@@ -661,6 +1015,8 @@ def node_presentation(eep):
         return 2001, "window.casement"
     if eep == "A5-14-09":
         return 2001, "window.casement"
+    if eep == "A5-3F-7F":
+        return 2004, "nodeicon_shutter"
     if eep.startswith("F6-02-"):
         return 24, "switch.2"
     if eep.startswith("A5-02-"):
@@ -685,6 +1041,8 @@ def default_name(eep, sender_id):
         kind = "Fenstergriff"
     elif eep == "A5-14-09":
         kind = "Fenstergriff"
+    elif eep == "A5-3F-7F":
+        kind = "Rollladenaktor"
     elif eep.startswith("F6-02-"):
         kind = "Wandtaster"
     elif eep.startswith("A5-02-"):

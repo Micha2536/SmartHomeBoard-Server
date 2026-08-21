@@ -2,6 +2,48 @@
 
 Der Server verlagert Geräteverbindungen, Zustände und Automationen aus der iOS-App auf einen dauerhaft laufenden Raspberry Pi. Die App bleibt Konfigurationsoberfläche und Dashboard.
 
+Server 0.20.2 führt den eigenständigen Automationsauslöser **„Gerätewert ändert sich“** ein. Er benötigt nur Gerät und Attribut und reagiert auf jede tatsächliche Änderung vom letzten zum neuen Wert – ohne Vergleichsart und ohne Vergleichswert. **„Ist ungleich“** bleibt dadurch wieder ein normaler Vergleich mit einem festgelegten Zielwert.
+
+Server 0.20.1 löst den in Push-Nachrichten ausgewählten Gerätewert in verständliche Texte auf. Auswahlattribute verwenden ihre hinterlegte Beschriftung; Fenster, Bewegung, Ein/Aus, Alarm, FT55-Taster und Rollläden erscheinen beispielsweise als „Offen“, „Geschlossen“, „Bewegung“, „Keine Bewegung“, „Ein“ oder „Aus“ statt als rohe Zahl.
+
+Server 0.20.0 führt ein persistentes **Schaltprotokoll** ein. Jeder Serverbefehl speichert millisekundengenauen Zeitstempel, Gerät und Attribut, alten und angeforderten Wert, Erfolg oder Fehler sowie seine Quelle. iOS-/Mac-Befehle enthalten den konkreten App-Gerätenamen und die stabile Clientkennung; Automationen enthalten Namen, Regel-ID, Aktion und Auslöserkontext. Zusätzlich protokolliert der Server rückgemeldete Änderungen schaltbarer Attribute. Liegt dazu innerhalb von 15 Sekunden kein passender SHB-Befehl vor, erscheint die Quelle als **Extern / Gerät**. Dadurch lassen sich insbesondere unerwartete Shelly-Schaltungen von SHB-Automationen, App-Befehlen und Shelly-internen Zeitplänen, Scripts, Eingängen oder Cloudsteuerungen unterscheiden. Das filterbare Protokoll steht im Webportal unter **Schaltprotokoll** und über `GET /api/v1/audit/events` bereit; höchstens 10.000 Einträge werden dauerhaft gehalten.
+
+Server 0.19.1 überträgt für laufende Automationen Startzeit und Ablaufzeit an die App, damit der Laufzeit-Kreisel auch bei serverseitig ausgeführten Verzögerungen sichtbar bleibt und vom iPad gestoppt werden kann. Server 0.19.0 verwendet für den Eltako FJ62NP standardmäßig den bidirektionalen GFVS-Dialog A5-3F-7F: SHB sendet FFF80D80, wartet auf die Aktorbestätigung mit der echten Sender-ID und fragt danach mit 00000008 einen weiteren Status ab. Erst empfangene Bestätigungen kennzeichnen das Gerät im Webportal als bidirektional bestätigt; spätere Aktorbestätigungen aktualisieren den Zustand. Der virtuelle F6-Richtungstaster bleibt nur als klar gekennzeichnete Alternative erhalten. Server 0.18.9 ergänzte die getrennten Wippe-A-/Wippe-B-Tests.
+
+Server 0.18.7 gleicht die virtuellen EnOcean-Tastertelegramme mit der Referenzimplementierung EnOceanJS ab: Gedrückt wird mit RPS-Status `0x30`, Loslassen mit `0x20` gesendet, bei 120 ms Tastdauer. Nach jedem Funkauftrag wartet SHB nun auf die ESP3-Antwort des USB300 und meldet Ablehnung oder Zeitüberschreitung, statt einen wirkungslosen Befehl fälschlich als erfolgreich zu behandeln.
+
+Server 0.18.6 ergänzt für den Eltako FJ62NP-230V den empfohlenen Anlernpfad als virtuellen EnOcean-Richtungstaster. Der USB300 sendet beim Anlernen vier normale RPS-Tastendrücke samt Loslassen; Rauf, Runter und Stopp verwenden danach ebenfalls Tastertelegramme statt GFVS-Fahrbefehlen. Die Integrationsseite führt jetzt eindeutig zum vollständigen EnOcean-Anlerndialog und erklärt, dass der dortige F6-Fallback keine Geräteauswahl ist.
+
+Server 0.18.5 zeigt beim EnOcean-Anlernen nach der Profilauswahl sofort eine nummerierte, gerätespezifische Anleitung. Für den Eltako FJ62NP-230V sind Lernmodus, GFVS-Lerntelegramm, Bestätigung und Funktionstest konkret beschrieben; für alle übrigen EEPs erzeugt SHB passend zur Telegrammfamilie und zum Unterstützungsstand eine verständliche Anleitung.
+
+Server 0.18.4 stellt im EnOcean-Webportal wieder den vollständigen, durchsuchbaren EEP-Katalog bereit. Das neue bidirektionale Rollladenprofil **A5-3F-7F** unterstützt unter anderem den Eltako FJ62NP-230V: SHB liest die USB300-Basis-ID, sendet das GFVS-Lerntelegramm und stellt Öffnen, Stoppen und Schließen als normale Rollladensteuerung bereit.
+
+Server 0.18.3 übernimmt die von jeder Hue-Leuchte gemeldeten Lichteffekte als übersetzte Auswahl. Neue Bridges werden über `effects_v2`, ältere Geräte weiterhin über `effects` gesteuert. Meldet ein Hue-Gerät die Identify-Aktion, erscheint zusätzlich der kurzzeitige Schalter **Erkennungsmodus**.
+
+Server 0.18.2 kennzeichnet von der Hue Bridge erzeugte Gruppen eindeutig im Gerätenamen: Räume erscheinen als **Raum: Name**, Zonen als **Zone: Name**. Dadurch lassen sie sich in Gerätelisten, Dashboard-Auswahl und Automationen zuverlässig von gleichnamigen Lampen unterscheiden.
+
+Server 0.18.1 korrigiert die Attribut-ID-Vergabe des Philips-Hue-Adapters. Attribute werden nun je Hue-Gerät unabhängig und stabil nummeriert, statt einen gemeinsamen Integrationszähler zu verwenden. Die irrtümliche Begrenzung auf 99 Hue-Attribute wurde entfernt; bereits vom ersten Adapterstand gespeicherte Attribut-IDs werden automatisch übernommen.
+
+Server 0.18.0 ergänzt einen lokalen **Philips Hue Bridge**-Adapter auf Basis der Hue API v2. Bridges können per mDNS gefunden oder über ihre IP-Adresse eingetragen und nach Druck auf die physische Link-Taste direkt im SHB-Webportal beziehungsweise in der iOS-App gekoppelt werden. Lampen, gruppierte Raumlichter, Bewegungs-, Temperatur-, Helligkeits-, Kontakt-, Taster- und Batteriesensoren werden importiert. Schalten, Dimmen, RGB-Farbe und Farbtemperatur sind schreibbar; Änderungen der Hue Bridge werden über den lokalen SSE-Endpunkt `/eventstream/clip/v2` live und mit automatischem Wiederverbinden übernommen.
+
+Server 0.17.8 stellt den BLU-Livefeed über RPC sicher: Das SmartHomeBoard-Script meldet beim Shelly Scan-Manager immer einen eigenen kontinuierlichen BLE-Scanauftrag an, auch wenn der CloudRelay bereits scannt. Die empfangenen `fcd2`-Pakete werden anschließend mit `Shelly.emitEvent` als `NotifyEvent` an die verbundenen lokalen RPC-WebSocket-Clients gesendet. Groß- und kleingeschriebene Varianten der Scanner-API werden unterstützt.
+
+Server 0.17.7 berücksichtigt bei `BLE.CloudRelay.ListInfos` auch das von Shelly Pro gelieferte verschachtelte Format `devices: [{"MAC": {...}}]`. Dadurch werden bereits vom CloudRelay empfangene BLU-Geräte samt BTHome-Service-Daten beim SHB-Anlernen sicher erkannt.
+
+Server 0.17.6 nutzt beim BLU-Anlernen zusätzlich `BLE.CloudRelay.ListInfos`, wenn der Shelly den Sensor bereits für die Shelly Cloud empfängt. Außerdem läuft der lokale SmartHomeBoard-BLE-Scanner nun auf allen scriptfähigen Shellys einschließlich Pro-Geräten parallel zur nativen BTHome-Suche. Damit werden BLU-Geräte auch dann lokal über RPC erkannt, wenn `BTHome.StartDeviceDiscovery` auf dem Gateway keine Geräte meldet.
+
+Server 0.17.5 korrigiert den BLE-Scanner für Shelly-Plus-Geräte: BTHome-Pakete werden entsprechend der Shelly-API aus `service_data["fcd2"]` gelesen und über ein lokales RPC-Ereignis an den Server weitergegeben. Ein bereits installierter SmartHomeBoard-BLE-Scanner wird beim Serverstart automatisch mit dem korrigierten Code überschrieben und neu gestartet.
+
+Server 0.17.4 startet die native BTHome-Gerätesuche direkt auf jeder bereits offenen Shelly-WebSocket-Verbindung. Die Integrationsansicht zeigt den Verbindungsstatus jedes Gateways und während beziehungsweise nach dem Anlernen die letzten BLU-relevanten Rohereignisse. Taucht eine neue dynamische BTHome-Komponente erst nach dem Serverstart auf, wird ihre Konfiguration unmittelbar neu geladen und die MAC-Zuordnung erneut aufgebaut.
+
+Server 0.17.3 wertet beim BLU-Anlernen auf allen Shelly-WebSockets neben `bthome.device_discovered` auch normale `NotifyStatus`- und `NotifyEvent`-Nachrichten vorhandener `bthomedevice`- und `bthomesensor`-Komponenten aus. Dadurch wird ein bereits auf einem Shelly Pro registrierter Door/Window beim Öffnen oder Schließen anhand seiner MAC-Adresse als neuer SHB-Kandidat erkannt, mit der zuvor gewählten Vorlage angelegt und bei Empfang über mehrere Shellys nicht dupliziert.
+
+Server 0.17.2 ergänzt für Shelly-Plus-Geräte ohne native `BTHome.StartDeviceDiscovery`-Methode einen lokalen BLE-Scanner. Der Server installiert dafür einmalig das aktivierte Shelly-Script **SmartHomeBoard BLE v1**. Es filtert BTHome-Werbepakete und überträgt sie über die ohnehin bestehende lokale RPC-WebSocket-Verbindung. BLU Door/Window wird einschließlich Batterie, Kontakt, Helligkeit und Öffnungswinkel dekodiert; Empfang über mehrere Gateways bleibt dedupliziert.
+
+Server 0.17.1 zeigt im Webportal unter jeder Integration deren Geräte und einen persistenten Aktiv-Schalter. Deaktivierte Geräte bleiben in der Serverdatenbank, empfangen weiterhin aktuelle Werte und können weiter von Serverautomationen verwendet werden, werden aber nicht mehr an App-Dashboards ausgeliefert. Beim erneuten Aktivieren erscheinen vorhandene Dashboard-Kacheln wieder.
+
+Server 0.17.0 ergänzt Shelly Gen2, Gen3 und Gen4 einschließlich dynamischer Plus-Add-on-Komponenten und Shelly BLU/BTHome. Shellys werden per mDNS oder über zusätzliche IP-Adressen gefunden und dauerhaft über RPC-WebSockets überwacht. BLU-Geräte werden beim 30-sekündigen Anlernen auf allen geeigneten Shellys empfangen und anhand ihrer MAC-Adresse gatewayübergreifend zusammengeführt.
+
 Server 0.16.4 stellt den Messwertverlauf serverseitig angebundener homee-Geräte auch der iOS-App bereit. Der Abruf läuft über die bereits aktive homee-WebSocket-Sitzung und erzeugt weder einen zusätzlichen Login noch eine zweite Verbindung.
 
 Server 0.16.3 speichert über die App geänderte Namen von Servergeräten zentral und persistent. Die Überschreibung bleibt bei Modulupdates und neuen Gerätesnapshots erhalten und wird per Liveverbindung an alle verbundenen iPads und Macs verteilt.
@@ -81,9 +123,31 @@ Die Datenbank und eigenen Modbus-Profile bleiben im eingebundenen `data`-Ordner 
 - `go_e`: lokale go-e HTTP API v2.
 - `modbus`: universeller Modbus-TCP-Adapter. MENNEKES AMTRON 4You 500 / 4Business 700 ist als Profil enthalten.
 - `enocean`: EnOcean USB300 über das standardisierte ESP3-Protokoll mit persistentem Anlernmodus.
+- `shelly`: Shelly Gen2+/Gen3/Gen4, Plus Add-on und Shelly BLU/BTHome über lokale RPC-WebSockets.
+- `philips_hue`: Philips Hue Bridge API v2 mit lokaler Link-Button-Anmeldung und SSE-Livefeed.
 - `homee`: dauerhafte lokale homee-WebSocket-Verbindung mit persistentem Gerätesnapshot und Livewerten.
 - `roborock`: persistente Roborock-Cloud-Verbindung mit E-Mail-Code-Anmeldung, Zuständen und Reinigungssteuerung.
 - `bosch-smart-home`: lokale, zertifikatsgesicherte Verbindung zum Bosch Smart Home Controller mit Livewerten, Gerätesteuerung und Szenarien.
+
+## Shelly Gen2+, Plus Add-on und BLU/BTHome
+
+Unter **Integrationen → Shelly Gen2+ / BLU** reicht normalerweise das Speichern einer aktiven Integration. Der Server sucht über den offiziellen mDNS-Dienst `_shelly._tcp` nach Shelly Gen2, Gen3 und Gen4. Falls Multicast zwischen Container und LAN gefiltert wird, können mehrere feste IP-Adressen kommagetrennt ergänzt werden. Geräte mit aktivierter Shelly-Authentifizierung verwenden das gemeinsame optionale Gerätepasswort; es wird nach dem Speichern aus der sichtbaren Konfiguration entfernt.
+
+Für jedes gefundene Gerät lädt der Server Geräteinformation, Gesamtstatus, Konfiguration und alle Seiten von `Shelly.GetComponents`. Dadurch erscheinen Relais, Leistung, Energie und dynamische Plus-Add-on-Sensoren gemeinsam unter dem physischen Hauptgerät. Namen aus der Shelly-Konfiguration werden übernommen; nicht benannte Add-on-Werte erhalten verständliche Bezeichnungen wie **Plus Add-on · Temperatur 1** oder **Plus Add-on · Eingang 2**. `NotifyStatus`, `NotifyFullStatus` und `NotifyEvent` aktualisieren diese Werte anschließend über eine dauerhafte lokale RPC-WebSocket-Verbindung.
+
+Zum Anlernen eines Shelly-BLU-Geräts in App oder Webportal eine Gerätevorlage wählen und den 30-sekündigen Lernmodus starten. Alle geeigneten Shellys hören gleichzeitig. Mehrfach empfangene Broadcasts werden über die normalisierte Bluetooth-MAC-Adresse zusammengeführt; der erzeugte SHB-Node bleibt deshalb unabhängig vom jeweiligen empfangenden Shelly. Für verschlüsselte BTHome-Geräte kann optional der 32-stellige AES-Schlüssel angegeben werden. Dieser wird getrennt vom normalen Modulzustand gespeichert und nicht in der Geräteliste ausgegeben.
+
+Bei einem **Shelly BLU Door/Window** während des laufenden Lernmodus den Magnetkontakt einmal öffnen oder schließen beziehungsweise die Sensortaste kurz drücken. Ein langer Tastendruck ist für das normale unverschlüsselte BTHome-Anlernen nicht erforderlich. In der iOS-Verwaltung zeigt jeder Gatewayeintrag, ob die native BTHome-Suche oder der SmartHomeBoard-BLE-Scanner verwendet wird.
+
+Die Docker-Konfiguration verwendet bereits `network_mode: host`, was für mDNS und direkte lokale RPC-Verbindungen erforderlich ist. Shelly-WebSockets und HTTP-RPC bleiben im lokalen Netz; es ist keine Shelly-Cloud-Verbindung notwendig.
+
+## Philips Hue Bridge verbinden
+
+Unter **Integrationen → Philips Hue Bridge** kann die lokale IP-Adresse beziehungsweise der Hostname der Bridge eingetragen werden. Bleibt das Feld leer, sucht der Server über den offiziellen mDNS-Dienst `_hue._tcp` im lokalen Netz. Anschließend die runde Taste auf der Hue Bridge drücken und innerhalb des Kopplungsfensters unter **Modulaktionen** auf **Bridge-Taste drücken und verbinden** tippen. Der dabei erzeugte Application Key wird ausschließlich als Server-Secret gespeichert und nach einer Neuinstallation nicht erneut benötigt, solange der persistente `data`-Ordner erhalten bleibt.
+
+Der Server verwendet ausschließlich die lokale Hue API v2 über HTTPS. Nach dem initialen Abruf von `/clip/v2/resource` bleibt eine Verbindung zu `/eventstream/clip/v2` geöffnet. SSE-Teilupdates werden mit dem vorhandenen Ressourcenzustand zusammengeführt; bei einer Unterbrechung verbindet sich der Server mit ansteigender Wartezeit erneut. Ein vollständiger Ressourcenabgleich dient zusätzlich als konfigurierbares Sicherheitsnetz.
+
+Hue-Lampen und `grouped_light`-Ressourcen von Räumen beziehungsweise Zonen stellen An/Aus, Helligkeit, RGB-Farbe und – sofern unterstützt – Farbtemperatur bereit. Services eines physischen Hue-Sensors werden anhand von `owner.rid` zu einem SHB-Gerät zusammengeführt. Dadurch erscheinen beispielsweise Bewegung, Helligkeit, Temperatur und Batterie gemeinsam unter dem Namen des Hue-Bewegungsmelders. Nicht benötigte Geräte können in der Integrations-Geräteliste deaktiviert werden; sie bleiben dabei weiterhin aktuell, werden aber nicht an das Dashboard ausgeliefert.
 
 ## Bosch Smart Home verbinden
 
