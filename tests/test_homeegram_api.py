@@ -52,6 +52,7 @@ class HomeegramAPITests(unittest.TestCase):
     def test_admin_auth_required_for_list_and_delete_not_mcp_token(self):
         for headers in ({}, {"Authorization": "Bearer mcp-read-token"}):
             self.assertEqual(401, self.client.get(self.base, headers=headers).status_code)
+            self.assertEqual(401, self.client.get(self.base + "/catalog", headers=headers).status_code)
             self.assertEqual(401, self.client.post(self.base + "/849/delete", headers=headers,
                                                  json=self.payload).status_code)
         self.adapter._refresh_homeegram_snapshot.assert_not_awaited()
@@ -65,6 +66,85 @@ class HomeegramAPITests(unittest.TestCase):
         self.adapter._refresh_homeegram_snapshot.assert_awaited_once_with(self.adapter.socket)
         self.adapter.delete_homeegram_confirmed.assert_not_awaited()
         self.assertNotIn("private-password", response.text)
+
+    def test_catalog_is_source_local_native_cached_and_credential_free(self):
+        self.adapter.context = SimpleNamespace(integration_id="home")
+        self.adapter.nodes = {3357: {
+            "id": 3357, "name": "Flur EG", "integration_id": "home", "integration_source": "server",
+            "password": "private-node-password", "access_token": "private-node-token",
+            "attributes": [{"id": 8674, "node_id": 3357, "type": 25, "name": "Bewegung",
+                            "current_value": 1, "editable": False, "secret": "private-attribute-secret"},
+                           {"id": 8675, "type": 0, "current_value": "private-string-value",
+                            "data": "private-binary-value"}]
+        }}
+        self.adapter.resources.update({
+            "groups": [{"id": 7, "name": "Flur", "type": 1, "token": "private-group-token"}],
+            "users": [{"id": 58, "username": "Michael", "password": "private-user-password",
+                       "access_token": "private-user-token", "sessions": ["private-session"]}],
+            "plans": [{"id": 3, "name": "Heizen", "type": 2, "credentials": "private-plan-secret"}],
+            "relationships": [{"id": 68, "group_id": 7, "node_id": 3357, "homeegram_id": 0,
+                               "order": 0, "configuration": "private-relation-secret"}],
+            "configuration": {"password": "private-resource-password"},
+            "nodes": [{"id": 900, "name": "Nicht aus Resource-Nodes lesen"}]
+        })
+        self.runtime.adapters["other"] = SimpleNamespace(nodes={999: {"id": 999, "name": "Andere Quelle"}})
+        response = self.client.get(self.base + "/catalog", headers=self.headers)
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("no-store", response.headers["Cache-Control"])
+        payload = response.json()
+        self.assertEqual(("home", "homee", True), (payload["integration_id"], payload["source"], payload["cached"]))
+        self.assertEqual([3357], [node["id"] for node in payload["nodes"]])
+        self.assertEqual("homee", payload["nodes"][0]["integration_source"])
+        self.assertEqual("home", payload["nodes"][0]["integration_id"])
+        self.assertEqual(8674, payload["nodes"][0]["attributes"][0]["id"])
+        self.assertEqual(3357, payload["nodes"][0]["attributes"][0]["node_id"])
+        self.assertEqual(1, payload["nodes"][0]["attributes"][0]["current_value"])
+        self.assertEqual([{"id": 58, "username": "Michael"}], payload["users"])
+        self.assertEqual([{"id": 7, "name": "Flur", "type": 1}], payload["groups"])
+        self.assertEqual([{"id": 3, "name": "Heizen", "type": 2}], payload["plans"])
+        self.assertEqual([{"id": 68, "group_id": 7, "node_id": 3357, "homeegram_id": 0, "order": 0}], payload["relationships"])
+        self.assertNotIn("private-", response.text)
+        self.assertNotIn("homeegrams", payload)
+        self.adapter._refresh_homeegram_snapshot.assert_not_awaited()
+        self.adapter.delete_homeegram_confirmed.assert_not_awaited()
+
+    def test_catalog_optional_empty_resources_do_not_block_old_firmware(self):
+        self.adapter.nodes = {}
+        response = self.client.get(self.base + "/catalog", headers=self.headers)
+        self.assertEqual(200, response.status_code, response.text)
+        for collection in ("nodes", "users", "groups", "plans", "relationships"):
+            self.assertEqual([], response.json()[collection])
+
+    def test_catalog_rejects_foreign_node_and_adapter_identity(self):
+        self.adapter.nodes = {33: {"id": 33, "integration_id": "other"}}
+        self.assertEqual(409, self.client.get(self.base + "/catalog", headers=self.headers).status_code)
+        self.adapter.nodes = {}
+        self.adapter.context = SimpleNamespace(integration_id="other")
+        self.assertEqual(409, self.client.get(self.base + "/catalog", headers=self.headers).status_code)
+
+    def test_catalog_rechecks_source_after_projection(self):
+        project = self.access.catalog_snapshot
+
+        def replace_source(integration_id, adapter):
+            result = project(integration_id, adapter)
+            self.runtime.adapters["home"] = SimpleNamespace(socket=object())
+            return result
+
+        self.access.catalog_snapshot = replace_source
+        self.assertEqual(409, self.client.get(self.base + "/catalog", headers=self.headers).status_code)
+
+    def test_catalog_rejects_malformed_collections_and_strips_nested_values(self):
+        self.adapter.resources["groups"] = {"id": 7}
+        self.assertEqual(502, self.client.get(self.base + "/catalog", headers=self.headers).status_code)
+        self.adapter.resources["groups"] = [{"id": True}, {"name": "ohne ID"}, "falsch"]
+        self.adapter.nodes = {33: {"id": 33, "name": {"token": "private-nested-token"},
+                                   "attributes": [{"id": 5, "current_value": float("nan"),
+                                                   "data": {"token": "private-nested-token"}}]}}
+        response = self.client.get(self.base + "/catalog", headers=self.headers)
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual([], response.json()["groups"])
+        self.assertNotIn("private-nested-token", response.text)
+        self.assertNotIn("current_value", response.json()["nodes"][0]["attributes"][0])
 
     def test_delete_independent_of_disabled_mcp_and_returns_only_confirmed_metadata(self):
         self.database.set_setting("mcp_access", {"enabled": False, "allow_homee_deletion": False})
@@ -106,6 +186,7 @@ class HomeegramAPITests(unittest.TestCase):
         for source, status in (("missing", 404), ("shelly", 400), ("disabled", 409)):
             base = f"/api/v1/integrations/{source}/homeegrams"
             self.assertEqual(status, self.client.get(base, headers=self.headers).status_code)
+            self.assertEqual(status, self.client.get(base + "/catalog", headers=self.headers).status_code)
             self.assertEqual(status, self.post(path=base + "/849/delete").status_code)
         self.adapter.delete_homeegram_confirmed.assert_not_awaited()
 
@@ -114,6 +195,7 @@ class HomeegramAPITests(unittest.TestCase):
             self.runtime.adapters["home"] = adapter
             self.assertEqual(503, self.post().status_code)
             self.assertEqual(503, self.client.get(self.base, headers=self.headers).status_code)
+            self.assertEqual(503, self.client.get(self.base + "/catalog", headers=self.headers).status_code)
         self.adapter.delete_homeegram_confirmed.assert_not_awaited()
 
     def test_authorize_callback_checks_integration_and_adapter_again(self):
