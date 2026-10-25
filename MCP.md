@@ -1,171 +1,254 @@
-# MCP in SHB (Server 0.20.26 / iOS-Build 318)
+# KI-/MCP-Anbindung von SmartHomeBoard
 
-## Echte SHB-Serverautomationen über MCP
+MCP stellt einer externen KI-Anwendung Werkzeuge für den SHB-Server bereit: Geräte und Zustände lesen, Homeegramme erklären und gemeinsam entwerfen sowie ausdrücklich freigegebene Änderungen ausführen. SHB betreibt dabei kein eigenes KI-Modell.
 
-Ab 0.20.26 sind **Serverautomationen** ein eigener MCP-Bereich, getrennt von Homeegrammen und HG-Entwürfen. Sie werden in der regulären Automationsverwaltung des Servers gespeichert, bleiben bei App-Synchronisierung erhalten und laufen auf SHB – nicht auf homee. Geräte verschiedener aktiver Servermodule können gemeinsam verwendet werden. Dafür **SHB-Geräte-/Attribut-IDs** aus `list_devices` verwenden, niemals die Original-homee-IDs aus `get_homee_catalog`. Serverautomationen haben eine eigene `automation_id` (UUID); eine HG-Nummer ist keine Automations-ID.
+Diese Anleitung beschreibt den aktuellen Funktionsumfang. Die iOS-App verwaltet Zugang und Berechtigungen; der MCP-Endpunkt läuft auf dem dauerhaft erreichbaren SHB-Server.
 
-In App-Build 318 unter **Lokaler Server → KI / MCP → Server-Automationen** zwei unabhängige Rechte bewusst einschalten und speichern:
+## Einrichtung
 
-- `allow_server_automation_creation`: neue echte Serverregeln **deaktiviert** anlegen.
-- `allow_server_automation_activation`: ausgewählte vorhandene Serverregeln aktivieren/deaktivieren. Aktivieren kann bei späteren Auslösern reale Geräteaktionen verursachen; der Aufruf betätigt weder Play noch Test.
+1. Den aktuellen Server vollständig installieren bzw. mit `docker compose up -d --build` aktualisieren. Bei Z-Wave `docker compose --profile zwave up -d --build` verwenden. Vorher Daten sichern; `data`, `secrets` und `.env` behalten.
+2. Einen administrativen Server-API-Schlüssel einrichten und die iOS-App unter **Lokaler Server** verbinden. Ohne administrativen Schlüssel ist die MCP-Verwaltung gesperrt.
+3. In der App **Lokaler Server → KI-Anbindung → MCP-Zugang und HG-Entwürfe** öffnen.
+4. **MCP-Zugang aktivieren** einschalten, nur die gewünschten Rechte auswählen und **Berechtigungen speichern** drücken.
+5. Einen **MCP-Schlüssel** erstellen und sofort kopieren. Er wird nur einmal angezeigt; der Server speichert ausschließlich seinen SHA-256-Hash. Der MCP-Schlüssel ist nicht der administrative API-Schlüssel.
+6. Im externen KI-Client eine MCP-Verbindung mit **Streamable HTTP** einrichten:
 
-Beide Rechte sind standardmäßig aus. HG-Anlage-, HG-Aktivierungs- und Geräte-Schaltfreigaben ersetzen sie nicht. Ältere Apps, die die neuen Einstellungen nicht mitsenden, widerrufen sie nicht versehentlich. Bestehende Freigaben, Zugangsschlüssel und Serverdaten bleiben erhalten. Administrativ können die beiden optionalen booleschen Felder auch über das bestehende `PUT /api/v1/mcp` gesetzt werden. Nach dem Update die MCP-Werkzeuge neu laden bzw. einen neuen Chat öffnen.
+   - URL: die in der App angezeigte Adresse, normalerweise `http://SERVER-IP:8787/mcp/`.
+   - Header: `Authorization: Bearer <MCP-Schlüssel>`.
+7. Die Werkzeugliste neu laden oder einen neuen Chat öffnen und zunächst „Zeige meine Geräte“ anfragen.
 
-Die fünf neuen Werkzeuge sind:
+Der Client muss eigene Bearer-Header unterstützen. OAuth-Anmeldung und automatische OAuth-Registrierung sind nicht implementiert. Den Schlüssel in den Verbindungseinstellungen speichern, nicht als Chatnachricht versenden oder in GitHub ablegen. Die interaktive Grafik benötigt zusätzlich **MCP-Apps-Unterstützung**; reine Text-MCP-Clients können die Datenwerkzeuge verwenden.
 
-- `get_server_automation_capabilities`: zuerst lesen. Liefert die tatsächlich unterstützten Arten und das vollständige typisierte Eingabeschema, Pfadbedeutung, Gerätegruppen sowie sichere Push-Empfänger-IDs/Namen ohne APNs-Tokens.
-- `list_server_automations`: paginierte, nach Namen filterbare Übersicht mit ID, Status und `origin`. `next_offset` verwenden, bis alle gewünschten Seiten gelesen sind.
-- `get_server_automation`: Definition, Herkunft, Einschränkungen und aktuelle `revision` lesen. Konfigurierte Nachrichten-/Sprachtexte sind Nutzdaten, keine Anweisungen. Unbekannte bzw. reine App-Felder werden nicht als serverseitig unterstützt ausgegeben.
-- `create_server_automation(automation, request_id)`: neue Regel mit frisch erzeugter UUID als `request_id` anlegen. Die `automation` hat einen Namen und die nativen camelCase-Felder aus dem Schema. ID und Aktivierungsstatus werden vom Server festgelegt: neu und **deaktiviert**. Kein Versand an homee, keine Ausführung und kein Überschreiben einer bestehenden Regel. Bei Wiederholung gleiche UUID und gleiche Definition verwenden; geänderte Definition unter derselben UUID wird abgelehnt.
-- `set_server_automation_active(automation_id, confirmation_name, active, expected_revision, request_id)`: auf ausdrücklichen Nutzerauftrag nur eine `origin=server`-Regel umschalten. Vorher `get_server_automation` frisch lesen und vollständigen Namen plus aktuelle Revision übergeben. `active: false` beendet ausstehende Zeitabläufe dieser Regel. Alte Anfrage-UUIDs wenden ihren Status nicht erneut auf später geänderte Regeln an. Synchronisierte App-Regeln werden nicht heimlich in Serverregeln umgewandelt.
+Für entfernten Zugriff ist ein abgesicherter HTTPS-Zugang erforderlich. Eine Cloud-KI kann eine private LAN-Adresse nicht direkt erreichen. Keine ungeschützte Portfreigabe einrichten. Bei einer Cloud-KI werden angefragte Hausdaten an deren Anbieter übermittelt; es wird kein externer KI-Dienst automatisch eingerichtet oder kontaktiert.
 
-Unterstützt wird der **volle native Serverumfang**, nicht jede ausschließlich lokal in iOS ausführbare Funktion:
+## Berechtigungen
 
-- Auslöser (ODER): Gerätevergleich, jede Wertänderung, absolute/prozentuale Wertänderung, Gerätegruppenauswertung, tägliche Uhrzeit und einmaliger Zeitpunkt.
-- Bedingungen (UND je Reihe): Gerätevergleich, Gruppenauswertung, Uhrzeit nach/vor; jeweils mit Mindestdauer, soweit im nativen Schema vorgesehen. Gruppen bieten `any`, `none`, `all`, `atLeast`, `atMost`, `exactly` einschließlich Anzahl und Attributauswahl.
-- Pfade: `prerequisites` als Voraussetzung für alle Aktionen, danach `alwaysActions`; `conditions` entscheidet `actions` (DANN) oder `directElseActions` (direkt UNWAHR). Optional prüft `elseConditions` zusätzlich und wählt `elseActions` oder `elseElseActions`. Keine Auslöser sind für manuell/indirekt aufrufbare Regeln ebenfalls zulässig; mindestens eine Aktion ist erforderlich.
-- Aktionen: Gerätewert setzen, Schalter umschalten, Roborock-Reinigung (Fläche/Raum/Routine/Punkt und optionale Reinigungswerte), Sonos-Sprachausgabe (Text, Lautstärke, Wiedergabe wiederherstellen), andere Automation steuern (Play/Stop/Aktivieren/Deaktivieren) und Server-Push (Titel, Text, ausgewählte Empfänger und optionaler Gerätewert). Dies sind **gespeicherte zukünftige Aktionen**, keine direkten MCP-Ausführungsbefehle.
-- Für alle Pfade: Aktionsverzögerungen, `cooldownSeconds`, `conditionValidation` mit `triggerTime`, `executionTime` oder `both` und die nativen Haltezeiten. Die zentrale Servervalidierung wird mit dem Webeditor geteilt; ungültige Geräte, Werte, Gruppen oder Empfänger werden nicht still durch andere ersetzt.
+Ein aktivierter MCP-Zugang mit gültigem Schlüssel erlaubt die bereitgestellten Lesezugriffe. Schreiben wird getrennt freigegeben; die folgenden Rechte sind standardmäßig aus:
 
-Die Laufzeitgrenzen stehen zusätzlich in `runtime_limits`: Positive Auslöser-Haltezeiten sind nur für Geräte- und Gruppen-Zustandsauslöser (`attribute`, `groupAttribute`) vorgesehen. Bei Änderungs- und Zeit-Auslösern muss `holdSeconds` null Sekunden sein; eine Aktionsverzögerung ist unabhängig davon möglich. Zeit-Auslöser unterstützen tägliche Uhrzeit oder einen einmaligen Zeitpunkt mit Zeitzone, keine nicht implementierten Wochen-/Monats-RRULEs. Sonst würden Einstellungen lediglich gespeichert, aber nicht wie versprochen ausgeführt; deshalb lehnt MCP sie ausdrücklich ab. Zustand und Automationsjournal werden gemeinsam in einer kurzen SQLite-Transaktion gespeichert; der Schutz gegen parallele Web-/App-Änderungen gilt auch bei Aktivierung. Bis zu 100.000 Anfragen werden ohne Verdrängen alter UUIDs behalten.
+| Einstellung | Erlaubter Umfang |
+|---|---|
+| `allow_drafts` | Separate Homeegramm-Entwürfe in SHB anlegen und gemeinsam bearbeiten |
+| `allow_homee_creation` | Neue Homeegramme deaktiviert auf homee anlegen bzw. Entwürfe übertragen |
+| `allow_device_control` | Freigegebene An/Aus-Geräte ein-, aus- oder umschalten |
+| `allow_homee_activation` | Ausgewählte HGs aktivieren/deaktivieren, ohne Play |
+| `allow_homee_editing` | Elemente vorhandener HGs gezielt ändern; HG bleibt deaktiviert |
+| `allow_homee_deletion` | Eindeutig bestätigte Original-HGs einzeln oder als ausdrückliche Liste löschen |
+| `allow_server_automation_creation` | Echte Serverautomationen deaktiviert in SHB anlegen |
+| `allow_server_automation_activation` | Ausgewählte servereigene Regeln aktivieren/deaktivieren, ohne Play/Test |
 
-Smartwidgets, lokale Pop-ups, Dashboard-Seiten, Töne, Displayhelligkeit, Widget-Sichtbarkeit und ausschließlich appseitig weitergeleitete HG-Aktionen sind keine nativ auf dem Server ausgeführten Möglichkeiten und werden hier ausdrücklich abgelehnt. Zusätzliche direkte Play-/Test-, Bearbeitungs- oder Löschwerkzeuge für Serverregeln werden mit diesem Update nicht eingeführt. Bestehende HG-Werkzeuge und ihre Pfadzuordnung bleiben unverändert.
+Keines dieser Rechte schaltet ein anderes automatisch ein. Der MCP-Schlüssel hat keine administrativen Rechte. Die manuelle Übertragung eines Entwurfs in der iOS-App verwendet dagegen den administrativen App-Zugang.
 
-## Homeegramme als Aktion und Auslöser
+Zugang und einzelne Rechte lassen sich in der App entziehen. **Neuen MCP-Schlüssel erstellen** ersetzt den bisherigen Schlüssel. Deaktivierung und Schlüsselwechsel greifen bei der nächsten Anfrage; eine bereits laufende Anfrage kann noch abgeschlossen werden.
 
-Ab 0.20.24 unterstützen die Anlege-/Entwurfswerkzeuge, `edit_homeegram` und die gemeinsame grafische Ansicht native HG-Verweise. Eine HG-Aktion kann ein Ziel-HG **aktivieren**, **deaktivieren**, **abspielen** oder **stoppen**. Ein HG-Auslöser kann auf **Wird ausgelöst**, **Wird gestoppt**, **Wird aktiviert** oder **Wird deaktiviert** des Quell-HGs reagieren. Die Namen, Original-IDs und Ereignisse werden beim Lesen aufgelöst; fehlende Verweise bleiben sichtbar. Für Auswahl und Prüfung die HG-Liste genau derselben homee-Integration benutzen.
+## Daten lesen und Geräte schalten
 
-Für `create_homeegram`, `create_homeegram_draft` und den gemeinsamen `WorkspaceDraft` gilt diese Form (IDs sind nur Beispiele):
+| Werkzeug | Funktion |
+|---|---|
+| `list_homee_sources` | Verfügbare homee-Quellen mit Integrations-ID auswählen, ohne Zugangsdaten |
+| `get_homee_catalog` | Original-homee-Geräte-/Attribut-IDs, numerische Cachewerte und Wertebereiche lesen |
+| `list_devices` | Geräte aus den aktiven Serverintegrationen mit SHB-IDs auflisten |
+| `get_device_state` | Den zuletzt bekannten Zustand eines SHB-Geräts lesen |
+| `list_homeegrams` | HGs einer ausgewählten homee-Quelle auflisten |
+| `get_homeegram` | Ablauf, unterstützte Elemente und aktuelle HG-Revision lesen |
+| `control_device` | `on`, `off` oder `toggle` für ein sichtbares, schreibbares An/Aus-Attribut einer aktiven Serverintegration senden |
+
+Listen können mehrere Seiten haben: Wo vorhanden, `next_offset` verwenden. Bei `list_homeegrams` den Offset anhand von `total` selbst bis zum Ende erhöhen. Nur Daten, die der Server tatsächlich besitzt, sind verfügbar. HomeKit-/Matter-Werte, die ausschließlich die iOS-App empfängt, werden nicht automatisch geteilt. Messhistorien sind kein MCP-Werkzeug.
+
+Zustände sind **Cachewerte, nicht garantiert live**. Beim Schalten bedeutet `command_sent: true` lediglich, dass der Befehl an den Adapter übermittelt wurde; es ist keine Hardwarebestätigung (`confirmed: false`). Danach den Zustand erneut lesen. Umschalten basiert auf dem zuletzt bekannten Wert. Das normale Schaltprotokoll kennzeichnet die Quelle **KI / MCP**. Freies Setzen von Dimmer-/Positionswerten ist kein direktes MCP-Werkzeug.
+
+Die ID-Räume dürfen nicht verwechselt werden:
+
+| Aufgabe | Benötigte IDs |
+|---|---|
+| Homeegramme lesen, entwerfen und ändern | Integrations-ID und Original-homee-IDs aus derselben homee-Quelle |
+| Geräte direkt schalten | SHB-Geräte-/Attribut-IDs aus `list_devices` bzw. `get_device_state` |
+| Serverautomationen konfigurieren | SHB-Geräte-/Attribut-IDs und Automations-UUIDs; keine HG-Nummern |
+
+## Homeegramme anlegen und bearbeiten
+
+| Werkzeug | Funktion |
+|---|---|
+| `create_homeegram_draft` | Einen separaten strukturierten Entwurf in SHB speichern; noch nicht auf homee |
+| `create_homeegram` | Ein neues echtes HG auf der gewählten homee-Quelle deaktiviert anlegen |
+| `set_homeegram_active` | Ein eindeutig ausgewähltes HG aktivieren/deaktivieren, ohne es abzuspielen |
+| `edit_homeegram` | Auslöser, Bedingungen und Aktionen eines vorhandenen HGs gezielt hinzufügen, ändern oder entfernen |
+
+Neue HGs werden immer **deaktiviert** gespeichert. `edit_homeegram` sichert die Originalfassung lokal, deaktiviert das HG vor der Änderung und lässt es deaktiviert. Eine spätere Aktivierung braucht eine eigene Freigabe und ausdrückliche Anweisung.
+
+### Unterstützte Neuanlage und Entwürfe
+
+Die strukturierte Neuanlage und die gemeinsame Entwurfsansicht unterstützen:
+
+- Eigenen manuellen Play-Auslöser über `manual_play`.
+- Geräteauslöser für Gleichheit, Überschreiten, Unterschreiten und jede Wertänderung. Für jede Änderung `comparison: "changed"` mit `value: 0` verwenden.
+- Gerätebedingungen mit festen Vergleichswerten, Pfad und Prüfzeitpunkt.
+- Geräteaktionen für Setzen oder Umschalten, mit Pfad und Verzögerung.
+- Andere Homeegramme als Auslöser oder als gespeicherte zukünftige Aktion.
+
+Zeitpläne, Gruppen, Push, Webhooks und andere Spezialelemente können über diese Neuanlage-/Entwurfswerkzeuge nicht hinzugefügt werden. Nicht unterstützte Anforderungen werden abgelehnt und dürfen nicht als umgesetzt bestätigt werden. Die regulären HG-Editoren sind davon getrennt.
+
+Ein übertragbarer Entwurf benötigt mindestens eine Aktion; je Bereich sind bis zu 40 Elemente möglich. Der Name umfasst 1–120 Zeichen, Aktionsverzögerungen höchstens sieben Tage. Der gemeinsame Workspace darf während der Bearbeitung auch noch leer sein.
+
+### Gezielte Änderungen vorhandener HGs
+
+Vor einer Bearbeitung `get_homeegram` lesen. `edit_homeegram` benötigt die Quelle, Original-HG-ID, den vollständigen URL-dekodierten Namen als `confirmation_name` und dessen aktuelle `revision` als `expected_revision`.
+
+Jede Änderung ist eine Operation `add`, `update` oder `remove` mit `section`, `kind`, bei bestehenden Elementen `element_id` sowie `parameters` für add/update. Pro Auftrag sind 1–120 gezielte Änderungen möglich. Nicht angegebene Felder bleiben erhalten; der Auftrag ersetzt nicht pauschal das gesamte HG.
+
+Das Hinzufügen und Ändern von Elementen über `edit_homeegram` unterstützt Geräte-, Zeit- und eigene Play-Auslöser, Geräte- und Zeitbedingungen sowie Geräte- und HG-Aktionen/-Auslöser. Zeitbedingungen haben ein Zeitfenster über `duration`; Zeitregeln verwenden homees `dtstart` und `rrule`. Die validierten Regeln erlauben unter anderem Intervalle, Wochentage, Monats-/Jahresbezug und Ablaufzeitpunkt. Das ist nicht mit dem kleineren Zeitumfang der SHB-Serverautomationen gleichzusetzen.
+
+Andere bekannte native Kategorien können gezielt entfernt, aber nicht neu angelegt oder geändert werden. Unberührte Spezialelemente bleiben erhalten. Umbenennen ist kein Bestandteil von `edit_homeegram`; der Name dient dort zur Bestätigung.
+
+### Bedingungen und Pfade
+
+homee hat eine gemeinsame WENN-Bedingungsreihe, keine verschachtelten SHB-Bedingungszweige:
+
+| Element | `branch` | Bedeutung |
+|---|---|---|
+| Bedingung | 0 | Immer-Voraussetzung für alle Aktionen; bei Nichterfüllung keine Aktionen |
+| Bedingung | 1 | Gemeinsame WENN-Reihe entscheidet zwischen DANN und SONST |
+| Aktion | 0 | IMMER, unabhängig vom WENN-Ergebnis, aber nur nach erfüllten Voraussetzungen |
+| Aktion | 1 | DANN, wenn die WENN-Reihe erfüllt ist |
+| Aktion | 2 | SONST, wenn die WENN-Reihe nicht erfüllt ist |
+
+Neue Bedingungen/Aktionen benötigen eine eindeutige Pfadzuordnung. Bei gezielten Änderungen bleiben nicht angegebene bestehende Pfad- und Prüfzeitpunktfelder erhalten. `check_moment` wird nicht mit dem Pfad oder Vergleichsoperator vermischt.
+
+### Andere HGs als Auslöser oder Aktion
+
+Ein HG-Auslöser reagiert auf **Wird ausgelöst**, **Wird gestoppt**, **Wird aktiviert** oder **Wird deaktiviert** eines anderen HGs derselben homee-Quelle.
+
+Eine HG-Aktion kann ein anderes HG **aktivieren**, **deaktivieren**, **abspielen** oder **stoppen**. Das konfiguriert eine zukünftige Aktion im gespeicherten HG und führt sie beim Speichern nicht aus.
+
+Beispiel der strukturierten Eingabe; IDs sind nur Platzhalter und müssen aus der gewählten Quelle ermittelt werden:
 
 ```json
 {
   "name": "HG-Verknüpfung",
   "manual_play": false,
-  "triggers": [{"type": "homeegram", "source_homeegram_id": 810, "event": "played"}],
-  "actions": [{"type": "homeegram", "target_homeegram_id": 811, "operation": "stop", "branch": 1, "delay": 5}]
+  "triggers": [
+    {"type": "homeegram", "source_homeegram_id": 810, "event": "played"}
+  ],
+  "actions": [
+    {"type": "homeegram", "target_homeegram_id": 811, "operation": "stop", "branch": 1, "delay": 5}
+  ]
 }
 ```
 
-`event` ist `activated`, `deactivated`, `played` oder `stopped`; `played` entspricht homees „Wird ausgelöst“ und ist der Standard für einen HG-Auslöser. `operation` ist `activate`, `deactivate`, `play` oder `stop`. Geräteauslöser und Geräteaktionen behalten ihre bisherige Form und dürfen in denselben Listen stehen. Bei HG-Verweisen keine Geräte-/Attribut-IDs oder Zahlenwerte hinzufügen. `manual_play` ist davon unabhängig: Es beschreibt den eigenen manuellen Play-Auslöser, nicht das Ereignis eines anderen HGs.
+`event` ist `activated`, `deactivated`, `played` oder `stopped`. `played` entspricht „Wird ausgelöst“. `operation` ist `activate`, `deactivate`, `play` oder `stop`. `manual_play` beschreibt dagegen den eigenen Play-Auslöser. Bei nativen Elementänderungen verwendet `homeegram_event` die Codes 1=Aktivieren/Aktiviert, 2=Deaktivieren/Deaktiviert, 3=Abspielen/Ausgelöst, 4=Stoppen/Gestoppt.
 
-Zum Bearbeiten verwenden native Änderungen `kind: homeegram_actions` mit `target_homeegram_id`, `homeegram_event`, `branch` und `delay` beziehungsweise `kind: homeegram_triggers` mit `source_homeegram_id` und `homeegram_event`. Die Codes sind jeweils 1=Aktivieren/Aktiviert, 2=Deaktivieren/Deaktiviert, 3=Abspielen/Ausgelöst, 4=Stoppen/Gestoppt. Neue Aktionen brauchen einen expliziten Pfad (0=Immer, 1=Dann, 2=Sonst). Ereignisänderungen vorhandener HG-Aktionen erhalten vorhandenen Pfad und Verzögerung, einschließlich der Abwesenheit dieser Felder in alten HGs.
+Direkte MCP-Werkzeuge zum sofortigen Abspielen/Stoppen eines HGs und freie WebSocket-Befehle werden nicht angeboten.
 
-Dies konfiguriert zukünftige Abläufe und ist **kein direkter Ausführungsbefehl**. Das Anlegen benötigt weiterhin nur die bestehende Anlagefreigabe, das Bearbeiten die Bearbeitungsfreigabe. Kein Recht wird automatisch eingeschaltet. Neue und bearbeitete HGs bleiben deaktiviert; referenzierte HGs werden beim Speichern nicht aktiviert, abgespielt oder gestoppt. Direktes Aktivieren/Deaktivieren über `set_homeegram_active` bleibt ein getrennter Weg. Neue Direkt-Play-/Stop-Werkzeuge werden damit nicht eingeführt. iOS-Build 317 bleibt unverändert; nach dem Serverupdate die MCP-Werkzeugliste neu laden.
+## Homeegramme grafisch ansehen und gemeinsam erstellen
 
-## Startfehler und vollständiges Update
-
-`ModuleNotFoundError: No module named 'server.homeegram_editing'` bedeutet einen unvollständigen Zwischenstand. Das vollständige Paket ab 0.20.22 enthält `homeegram_editing.py`, `homeegram_revision.py`, die zugehörigen Adaptermethoden und die interaktive Oberfläche. Nicht nur einzelne Python-Dateien austauschen. `data`, `secrets` und `.env` behalten; dann `docker compose up -d --build` ausführen (mit Z-Wave zusätzlich `--profile zwave`). Der Starttest prüft Import und vollständigen Anwendungsstart in einem frischen Prozess mit isolierten Testdaten.
-
-## Mehrere Homeegramme gezielt löschen
-
-Ab Server 0.20.23 kann `delete_homeegrams` auf ausdrücklichen Nutzerauftrag 1 bis 50 Original-HGs einer einzelnen homee-Quelle löschen. Jedes Ziel wird mit positiver `homeegram_id` und exakt URL-dekodiertem `confirmation_name` einzeln aufgeführt; dazu gehört eine neue UUID als `request_id` für den gesamten Auftrag. Keine Platzhalter, keine Wildcards und keine automatische Bereinigung. Die bisherige Freigabe `allow_homee_deletion` gilt auch hierfür; es gibt weder eine neue Freigabe noch eine automatische Aktivierung des Löschrechts. iOS-Build 317 bleibt unverändert.
-
-Vor dem ersten Löschbefehl lädt der Server den Bestand frisch und prüft alle aufgeführten Ziele und Namen. Ist ein Ziel nicht eindeutig oder falsch benannt, beginnt keine Löschung. Danach arbeitet er die Liste nacheinander ab: jedes vollständige Original vor seinem Löschbefehl lokal sichern und anschließend die Entfernung durch homee bestätigen. Bei der ersten fehlgeschlagenen oder unklaren Löschung stoppt der Auftrag; noch nicht bearbeitete Ziele werden als `not_attempted` ausgegeben. Die Ergebnisliste zeigt den Stand je HG. Das ist keine atomare Transaktion: bereits bestätigte Löschungen werden bei einem späteren Fehler nicht rückgängig gemacht. Verweise aus anderen HGs können ungültig werden.
-
-Ab 0.20.25 wird vor jedem neuen Einzelauftrag erneut vollständig gelesen. Eine verkürzte HG-Liste in der vorherigen DELETE-Antwort reicht zwar als Bestätigung der Abwesenheit, aber nicht als Inhaltsvorprüfung für das nächste HG. Automatische Änderungen an `order` gelten nicht als Bearbeitung. Außerdem dürfen ursprünglich vorhandene HG-Verweiszeilen exakt entfernt sein, wenn das referenzierte HG bereits in diesem selben Auftrag bestätigt gelöscht wurde. Alle verbleibenden Zeilen müssen unverändert und in derselben Reihenfolge vorliegen; neue/geänderte Verweise, Änderungen an Aktionen, Bedingungen, Namen, Erstellungszeit oder unbekannten Feldern stoppen weiterhin. Die strengere normale Editor-Revision bleibt unverändert. Zusätzliche Vergleichsdaten enthalten nur Hashes und Referenz-IDs, keine zweite Rohdatenkopie privater Nachrichten oder URLs.
-
-Bei einem Stopp enthält das betroffene Ergebnis einen sicheren `error_code`: `selection_changed`, `incomplete_homeegram`, `confirmation_timeout`, `connection_unavailable` oder `deletion_not_confirmed`. Das Audit nennt die betroffene HG-ID und diesen Code, aber keine privaten HG-Inhalte. Der Status bleibt aus Kompatibilitätsgründen `uncertain`; die späteren Ziele bleiben `not_attempted`. Alte gespeicherte Aufträge vor 0.20.25 haben nur die frühere Vollrevision und werden nicht still aus aktuellen Daten neu bestätigt. Bei einem solchen alten Auswahlkonflikt die verbliebenen HGs neu lesen und die gewünschte Restliste ausdrücklich neu bestätigen; unklare native Löschaufträge niemals blind erneut senden.
-
-Bei einer unterbrochenen oder unklaren Antwort dieselbe Batch-UUID und exakt dieselbe geordnete Zielliste verwenden. Aus der Batch-UUID abgeleitete stabile Einzel-UUIDs verhindern doppelte Löschbefehle; ein unklarer Einzelauftrag wird nur noch geprüft und nicht blind erneut gesendet. Eine geänderte Liste mit derselben UUID wird abgelehnt. Das bestehende `delete_homeegram` sowie die bestätigte Einzel-Löschung in der administrativen App-API bleiben verfügbar. Nach dem Serverupdate die MCP-Werkzeugliste neu laden.
-
-## Interaktive Homeegramm-Ansicht
-
-Ab 0.20.23 enthalten `get_homeegram`, `show_homeegram` und `get_homeegram_workspace` auch aufgelöste Gruppen-Auslöser, -Bedingungen und -Aktionen. Zu jedem Gruppenelement werden Name und ID der Gruppe, ihre Geräte aus `relationships`, die zum `attribute_type` passenden Eigenschaften mit Original-IDs, Cachewerte und lesbare Zielzustände ausgegeben. Die grafische Ansicht zeigt die Zusammenfassung am Knoten; ein Klick zeigt alle Mitglieder und Eigenschaften. Fehlende Gruppen, Geräte, Eigenschaften oder Relationships werden ausdrücklich markiert, nicht als bekannte leere Gruppe ausgegeben. HG-Mitglieder werden getrennt von Geräten geführt.
-
-Gruppenbedingungen behalten ihren genauen Umfang: kein Gerät, alle Geräte, mindestens eines oder nicht alle. Gruppen-Auslöser beschreiben das Ereignis eines passenden Geräts; Gruppenaktionen zeigen Setzen, Umschalten, Quellwert übernehmen oder Erhöhen/Verringern statt Zahlen ohne Bedeutung. Unbekannte Codes bleiben sichtbar unbekannt. Das ist keine Live-Auswertung und keine Bestätigung einer Geräteaktion. Gruppen sind in dieser MCP-Webansicht nur lesbar; sie werden beim Anzeigen weder verändert noch ausgeführt. Gruppen und Relationships werden bei Verbindungsaufbau sowie ausdrücklich angefordertem Vollabruf nachgeladen, nicht ständig gepollt.
-
-`show_homeegram` öffnet eine echte MCP-App, keine bloße Textskizze. Ohne ID zeigt sie die Übersicht, mit `homeegram_id` ein Original nur lesend, mit `draft_id` einen gemeinsam bearbeitbaren SHB-Entwurf. Die HTML-Resource wird als `text/html;profile=mcp-app` unter `ui://shb/homeegram/v1.html` ausgeliefert und per `_meta.ui.resourceUri` mit dem Werkzeug verknüpft. Es werden keine API-Schlüssel in HTML hinterlegt; Aufrufe laufen über die MCP-Apps-Host-Bridge.
-
-Für die Zusammenarbeit: `create_homeegram_workspace`, dann `show_homeegram(draft_id)`. Nutzer und KI verwenden `get_homeegram_workspace` und `update_homeegram_workspace` mit derselben Entwurf-ID und der aktuellen Revision. Leere Entwürfe sind möglich; Konflikte werden nicht überschrieben. Klicks auf Knoten öffnen deren Felder; Plus/Entfernen ändert nur den Entwurf. `deploy_homeegram_workspace` erstellt erst nach bewusster Bestätigung ein neues deaktiviertes HG. Originale werden in dieser Webansicht nicht direkt editiert; dafür dient das getrennt freigegebene `edit_homeegram`.
-
-Ein reiner Text-MCP-Client zeigt keine interaktive Oberfläche. Nach dem Update in einem MCP-Apps-fähigen Chat-Client die SHB-Verbindung/Werkzeugliste neu laden und ausdrücklich „Homeegramm grafisch öffnen“ anfragen. Ein bestehender `get_homeegram`-Aufruf bleibt ein Datenwerkzeug und öffnet absichtlich keine neue Oberfläche. Ein Serverupdate allein richtet weder eine Cloud-Verbindung noch OAuth ein.
-
-## Vorhandene HGs aktivieren und bearbeiten
-
-`set_homeegram_active` setzt auf ausdrücklichen Nutzerauftrag `active: true` oder `false`, ohne Play. Es benötigt die neue separate Freigabe `allow_homee_activation`.
-
-`edit_homeegram` benötigt `allow_homee_editing`, die Original-ID, den exakt dekodierten Namen und `expected_revision` aus `get_homeegram`. Änderungen sind einzelne `add`, `update` oder `remove`-Operationen mit `section`, `kind`, bei bestehenden Elementen `element_id` sowie `parameters` bei add/update. Geräte-, Zeit-, Play- sowie HG-Auslöser/-Aktionen sind anlegbar/bearbeitbar; andere bekannte native Kategorien sind gezielt entfernbar und bleiben sonst unverändert erhalten. Nicht unterstützte Änderungen werden ausdrücklich abgelehnt. Vor Änderungen wird gesichert und deaktiviert; das HG bleibt deaktiviert. Eine erneute Aktivierung ist eine eigene bewusste Aktion. Neue Freigaben sind standardmäßig aus und können ab iOS-Build 317 unter KI/MCP gesetzt werden.
-
-Neue Bedingungen brauchen explizit `branch: 0` (Immer-Voraussetzung für alle Aktionen) oder `branch: 1` (die gemeinsame Wenn-Reihe). Aktionen verwenden 0=Immer nach Voraussetzungen, 1=Dann, 2=Sonst. Beim Ändern bleiben nicht angegebene Pfad-/Prüfzeitpunkt-Felder erhalten; es gibt keine verschachtelten homee-Bedingungszweige. UUID-Wiederholungen bestätigen nur den vorhandenen Auftrag und senden keine unklaren Änderungen blind erneut. Die vollständige Sicherung bleibt lokal im Modulzustand, nicht im MCP-Ergebnis.
-
-## Einrichtung
-
-1. Server mit diesem Quellstand neu bauen: `docker compose up -d --build`. Mit Z-Wave: `docker compose --profile zwave up -d --build`. Vorhandene Verzeichnisse `data`, `secrets` und `.env` behalten.
-2. Einen administrativen API-Schlüssel in der Server-Einrichtung setzen. Ohne diesen sind auch die MCP-Verwaltungsendpunkte gesperrt.
-3. In der aktualisierten iOS-App unter **Lokaler Server → KI-Anbindung → MCP-Zugang und HG-Entwürfe** öffnen.
-4. Zugang aktivieren und Berechtigungen speichern. Neben Lesen sind getrennt freigebbar: HG-Entwürfe, **HGs auf homee anlegen · deaktiviert**, **Geräte schalten erlauben**, **Homeegramme löschen erlauben**, **Homeegramme aktivieren/deaktivieren** und **Homeegramme bearbeiten**. Neue Rechte sind nach dem Update zunächst aus. Löschen ist eine destruktive Aktion am Original auf homee, nicht am SHB-Import.
-5. Bei der Ersteinrichtung einen MCP-Schlüssel erzeugen und sofort kopieren. Er wird nur einmal geliefert; gespeichert wird ausschließlich sein SHA-256-Hash. Vorhandene Schlüssel bleiben beim Serverupdate gültig. Ersetzen widerruft den bisherigen Schlüssel.
-6. Im externen MCP-Client **Streamable HTTP** verwenden:
-   - URL: `http://SERVER:8787/mcp/` (bzw. die in SHB angezeigte Adresse)
-   - HTTP-Header: `Authorization: Bearer <MCP-Schlüssel>`
-
-Der Client muss eigene Bearer-Header unterstützen. Eine OAuth-Anmeldung bzw. automatische OAuth-Registrierung ist **nicht implementiert**. Nicht jede KI-Anwendung unterstützt diese Verbindungsart. Das MCP-SDK 1.30 übernimmt Protokollverhandlung und Streamable-HTTP-Lifecycle; es handelt sich nicht um einen beliebigen JSON-Endpunkt.
-
-Für Zugriff außerhalb des vertrauenswürdigen LAN: TLS/HTTPS über einen abgesicherten Zugang. Keine ungeschützte Portfreigabe. Cloud-Clients können eine private LAN-Adresse nicht direkt erreichen. Bei einer Cloud-KI verlassen angefragte Hausdaten das lokale Netz. Browser-Origins werden ausdrücklich abgewiesen; die erste Ausbaustufe richtet sich an native/serverseitige MCP-Clients. Die iOS-App ist Verwaltungs- und Prüfoberfläche, kein dauerhaft laufender MCP-Server.
-
-## Werkzeuge
-
-- `list_homee_sources`: homee-Quellen auswählen, ohne Zugangsdaten.
-- `list_devices`, `get_device_state`: numerische Cachewerte der Servergeräte, Einheiten und verfügbare Gerätezeitstempel. Lesezeit ist kein Nachweis frischer Messwerte.
-- `get_homee_catalog`: Original-homee-IDs, Attribute und Wertebereiche. Diese IDs für HGs nutzen, nicht fremde Modul-/SHB-IDs.
-- `list_homeegrams`, `get_homeegram`: HG-Cache lesen. Geräte-, Zeit-, Play-, HG-Auslöser/-Aktionen und aufgelöste Gruppenelemente werden ausgegeben. Andere Kategorien werden als ausgelassen markiert; insbesondere keine Webhook-URLs, Push-Inhalte oder Zugangsdaten ausgeben.
-- `create_homeegram_draft`: strukturierten Entwurf mit neuer UUID als `request_id` ablegen. Bei Wiederholung dieselbe UUID verwenden; geänderter Inhalt mit derselben UUID wird abgelehnt.
-- `create_homeegram`: ein echtes neues HG auf dem ausgewählten homee anlegen, immer deaktiviert. Benötigt `allow_homee_creation`. Verwendet die bestehende homee-Serversitzung. Erfolg liefert die von homee bestätigte HG-ID und `active: 0`; es wird weder aktiviert noch abgespielt.
-- `control_device`: mit `operation: on`, `off` oder `toggle` schalten. Benötigt `allow_device_control`. Verwendet SHB-IDs aus `list_devices`, akzeptiert nur sichtbare, schreibbare An/Aus-Attribute aktiver Serverintegrationen. Jeder Befehl benötigt eine neue UUID; bei Retry dieselbe verwenden. Das normale Schaltprotokoll zeigt die Quelle **KI / MCP**.
-- `delete_homeegram`: ein eindeutig benanntes Original-Homeegramm auf der ausgewählten homee-Integration löschen. Benötigt `allow_homee_deletion`, die positive Original-HG-ID, den exakt URL-dekodierten Namen als `confirmation_name` und eine neue UUID als `request_id`. Nur auf ausdrücklichen Nutzerauftrag, keine stillschweigende Bereinigung. Der Server lädt vor dem Löschen eine frische Liste, prüft Name und ID, sichert das vollständige HG lokal und bestätigt anschließend seine Abwesenheit auf homee. Verweise aus anderen HGs können ungültig werden.
-- `delete_homeegrams`: 1 bis 50 ausdrücklich aufgeführte Original-HGs derselben Quelle mit ID und Namensbestätigung löschen; ebenfalls `allow_homee_deletion`. Gesamte Zielliste vorprüfen, nacheinander sichern/löschen/bestätigen, beim ersten Fehler oder unklaren Ergebnis stoppen. Ergebnis je Ziel statt einer pauschalen Erfolgsmeldung; dieselbe Batch-UUID nur mit derselben geordneten Liste wiederholen. Keine Wildcards.
-
-Die HG-Anlage unterstützt manuelles Play, Geräteauslöser, Gerätebedingungen, Setzen/Umschalten mit Verzögerungen sowie die oben beschriebenen HG-Auslöser/-Aktionen. Zeitpläne, Push, Gruppen und andere Spezialelemente werden bei der Serverübertragung derzeit abgelehnt; diese danach im regulären HG-Editor auf homee ergänzen. Das Tool darf solche Anforderungen nicht als bereits umgesetzt ausgeben. Die Geräte-Schaltfunktion unterstützt hier An/Aus-Schalter; Dimmer-/Positionswerte sind noch kein eigenes MCP-Werkzeug.
-
-Pfadzuordnung bleibt unverändert:
-
-| Element | branch |
+| Werkzeug | Funktion |
 |---|---|
-| Voraussetzung für alle Aktionen | Bedingung 0 |
-| Wenn-Bedingung für Dann/Sonst | Bedingung 1 |
-| Immer-Aktion nach erfüllten Voraussetzungen | Aktion 0 |
-| Dann-Aktion | Aktion 1 |
-| Sonst-Aktion | Aktion 2 |
+| `show_homeegram` | Die interaktive MCP-App öffnen: Übersicht, Original-HG oder gemeinsamer Entwurf |
+| `get_homeegram_workspace` | Den aktuellen Inhalt und die Revision eines Entwurfs bzw. die Originalansicht lesen |
+| `create_homeegram_workspace` | Einen gemeinsamen, auch noch unfertigen Entwurf in SHB anlegen |
+| `update_homeegram_workspace` | Genau diesen Entwurf mit seiner aktuellen Revision ändern |
+| `deploy_homeegram_workspace` | Den bestätigten fertigen Entwurf als neues deaktiviertes HG übertragen |
 
-## Prüfung und Sicherheit
+Ablauf: Quelle auswählen, `create_homeegram_workspace` aufrufen, anschließend `show_homeegram(draft_id)` öffnen. Nutzer und KI bearbeiten dieselbe Entwurf-ID; Knoten anklicken, Felder anpassen und Elemente über Plus/Entfernen ergänzen. Jede Änderung benötigt die aktuelle Workspace-Revision. Konflikte werden nicht überschrieben. Erst ein ausdrücklich bestätigtes `deploy_homeegram_workspace` überträgt das neue HG auf homee.
 
-Separate Entwürfe erscheinen nach „Status und Entwürfe laden“ in SHB. **Im Ablauf bearbeiten** öffnet den vorhandenen grafischen Editor mit den Geräten genau der gewählten homee-Quelle. **Auf homee speichern · deaktiviert** überträgt den vorhandenen Entwurf direkt. Speichern im Editor überträgt die aktuell bearbeitete Fassung; Geräte-/Attribut-IDs, Schreibbarkeit, Wertebereiche und Pfade werden auf dem Server erneut geprüft.
+Original-HGs sind in der Webansicht **nur lesbar**. Änderungen an Originalen laufen ausschließlich über das getrennt freigegebene `edit_homeegram`. Ein normales `get_homeegram` öffnet absichtlich keine grafische Ansicht.
 
-Eine direkte Verbindung vom iPhone zum homee ist dafür nicht mehr nötig. Der Server verwendet seine bestehende Sitzung der im Entwurf gespeicherten Integration. Danach bleibt das HG deaktiviert auf homee liegen und kann dort regulär bearbeitet und bewusst aktiviert werden. Der Server speichert die HG-ID am Entwurf; erneutes Übertragen derselben Anfrage erzeugt keine weitere Kopie. Bei unklarer/teilweiser Anlage wird keine zweite Kopie und kein Element blind erneut angelegt; das gegebenenfalls teilweise vorhandene HG bleibt deaktiviert und muss auf homee geprüft werden.
+Die Darstellung löst Gruppen mit Namen, Mitgliedern, passenden Attributen, Original-IDs, Cachewerten und lesbaren Zielzuständen auf. Gruppen-Auslöser zeigen das Ereignis eines passenden Geräts; Bedingungen behalten ihren Umfang wie „alle“, „mindestens eines“, „keines“ oder „nicht alle“. Gruppenaktionen unterscheiden Setzen, Umschalten, Quellwert und Erhöhen/Verringern. Gruppen sind hier nur lesbar. Fehlende Zuordnungen und unbekannte Befehle werden markiert, nicht als erfolgreiche Ausführung interpretiert.
 
-Der MCP-Schlüssel hat keine administrativen Rechte. HG-Abspielen und freie WebSocket-Befehle sind nicht als MCP-Werkzeuge vorhanden. Aktivieren/Deaktivieren, Bearbeiten und Löschen erfordern jeweils eine eigene Freigabe; keines dieser Rechte schaltet Geräte-Schaltrecht oder HG-Anlagerecht automatisch ein. Administrativer API-Zugang und MCP-Schlüssel dürfen nicht anstelle voneinander verwendet werden. Die manuelle Übertragung eines Entwurfs in der iOS-App benutzt den administrativen App-Zugang und benötigt keine KI-Schaltfreigabe. Deaktivierung bzw. Rotation greift bei der nächsten Anfrage; eine bereits laufende Anfrage kann noch abgeschlossen werden.
+Geräte-, Zeit-, Play- und HG-Verweise werden soweit unterstützt dargestellt. Private Spezialelemente werden beim Lesen als ausgelassen gekennzeichnet bzw. in der Grafik als nicht bearbeitbare Platzhalter geführt. Es werden keine privaten Webhook-URLs oder Nachrichteninhalte dieser HG-Spezialelemente offengelegt.
 
-Vor einer MCP-Löschung liegt die vollständige Originalfassung im lokalen Modulzustand der Serverdatenbank. Die Sicherung wird nicht durch das MCP-Werkzeug ausgegeben, weil sie private URLs, Nachrichten oder andere Inhalte enthalten kann. Nur der administrative API-Zugang kann sie abrufen. Das ist eine Rohdatensicherung, keine automatische Wiederherstellung und kein Ersatz für die vorhandene HG-Backup-/Vorlagenfunktion. Bei unklarer Löschantwort dieselbe Anfrage-ID verwenden: Der Server prüft dann nur noch den Bestand und sendet keinen zweiten Löschbefehl. Ein Erfolg wird erst nach einer frischen Liste ohne die HG-ID gemeldet; eine später wiederverwendete ID wird durch eine bestätigte Wiederholung nicht gelöscht. Bis zu 1.000 Löschanfragen werden ohne automatische Verdrängung alter IDs behalten.
+Technisch wird die Resource `ui://shb/homeegram/v1.html` als `text/html;profile=mcp-app` über `_meta.ui.resourceUri` eingebunden. Die Ansicht verwendet die authentifizierte MCP-Apps-Host-Bridge; API-Schlüssel werden nicht ins HTML geschrieben. Direkte Browser-Anfragen mit Origin-Header an den MCP-Endpunkt werden abgewiesen.
 
-Ab 0.20.21 wird auch eine unmittelbar auf `DELETE:homeegrams/<ID>` gelieferte vollständige HG-Liste als Bestätigung erkannt. Ein weiteres `GET:homeegrams` ist nur nötig, solange noch keine Bestätigung vorliegt. Das verhindert die frühere falsche Timeout-Meldung nach bereits erfolgreicher Löschung.
+Separate Entwürfe können auch in der iOS-App über **Status und Entwürfe laden → Im Ablauf bearbeiten** geprüft und mit **Auf homee speichern · deaktiviert** übertragen werden. Der Server verwendet dabei seine bestehende homee-Sitzung; eine zweite direkte iPhone-homee-Verbindung ist nicht erforderlich.
 
-Die App ab Build 316 nutzt bei serverseitiger homee-Integration den administrativen HG-Endpunkt statt ihrer abgeschalteten Direktverbindung. Sie lädt die Liste aus genau dieser Quelle, bestätigt ID und Namen und entfernt den Eintrag erst nach bestätigter Löschung. Bei unklarer HTTP-Antwort bleibt die Anfrage-ID auch nach App-Neustart erhalten. Für diese ausdrücklich in der App bestätigte Aktion sind keine MCP-Freigaben nötig; der administrative API-Schlüssel ist erforderlich. Mehrere nicht eindeutig zuordenbare homee-Quellen werden nicht automatisch ausgewählt.
+## Homeegramme löschen
 
-Ein Gerätebefehl mit `command_sent: true` wurde an den Adapter übermittelt; dies bestätigt noch nicht den Hardwarezustand (`confirmed: false`). Umschalten basiert auf dem zuletzt bekannten Cachewert. Danach den Zustand mit `get_device_state` prüfen. Anfrage-UUIDs werden vor dem Versand dauerhaft reserviert; auch nach Timeout oder Neustart wird derselbe Befehl nicht erneut gesendet. Unklare Ergebnisse enthalten `command_sent: null`, `retry_allowed: false`. Vor einem neuen Befehl den Gerätezustand prüfen. Das Journal behält bis zu 100.000 Geräteanfragen; HG-Anlage hält bis zu 1.000 Anfragen, ohne alte IDs automatisch zu verwerfen.
+| Werkzeug | Funktion |
+|---|---|
+| `delete_homeegram` | Ein ausdrücklich ausgewähltes Original-HG löschen |
+| `delete_homeegrams` | 1–50 ausdrücklich aufgeführte Original-HGs derselben Quelle nacheinander löschen |
 
-Verwaltungs-API (administrativer Server-Schlüssel):
+Benötigt werden die Quelle und für jedes HG eine positive Original-ID mit exakt URL-dekodiertem Namen als `confirmation_name`, dazu eine neue UUID als `request_id`. Keine Wildcards, stillschweigende Auswahl oder automatische Bereinigung.
 
-- `GET /api/v1/integrations/{integration_id}/homeegrams`: frische Original-HG-Liste der ausgewählten homee-Quelle
-- `POST /api/v1/integrations/{integration_id}/homeegrams/{homeegram_id}/delete`: bestätigte Einzel-Löschung mit `confirmation_name` und `request_id` (UUID), inklusive lokaler Sicherung
-- `GET/PUT /api/v1/mcp`: Status/Berechtigungen
-- `POST /api/v1/mcp/rotate-token`: neuen Schlüssel einmalig ausgeben
-- `GET /api/v1/mcp/drafts`, `DELETE /api/v1/mcp/drafts/{id}`: Entwürfe
-- `GET /api/v1/mcp/drafts/{id}/catalog`: Geräte der gespeicherten homee-Quelle für den Editor
-- `POST /api/v1/mcp/drafts/{id}/deploy`: Entwurf oder aktuelle bearbeitete Fassung über den Server deaktiviert auf homee anlegen
-- `GET /api/v1/mcp/audit`: letzte 100 Zugriffsereignisse ohne Schlüssel oder Nutzdaten
-- `GET /api/v1/mcp/homeegram-deletions?integration_id=...`: Metadaten der lokalen Löschsicherungen
-- `GET /api/v1/mcp/homeegram-deletions/{request_id}/backup?integration_id=...`: vollständige Original-JSON-Sicherung, ausschließlich für Administratoren
+Der Server lädt vor der Löschung den Bestand frisch, prüft die Ziele, sichert jedes vollständige Original lokal und bestätigt danach dessen Entfernung durch homee. Bei einer Mehrfachlöschung wird zuerst die gesamte Liste geprüft. Anschließend wird nacheinander gesichert, gelöscht und bestätigt. Beim ersten Fehler oder unklaren Ergebnis stoppt der Auftrag; spätere Ziele stehen als `not_attempted` im Ergebnis.
 
-Nur Daten, die der Server tatsächlich besitzt, sind sichtbar. HomeKit-/Matter-Daten aus der iOS-App werden nicht automatisch übertragen. Messhistorien sind noch kein MCP-Werkzeug. Maximal 100 offene Entwürfe und 64 KiB pro MCP-Anfrage; Listen sind begrenzt. Kein externer KI-Dienst wird automatisch eingerichtet oder kontaktiert.
+Eine Mehrfachlöschung ist **nicht atomar**: bereits bestätigte Löschungen werden bei einem späteren Fehler nicht rückgängig gemacht. Ergebnis und Audit nennen den Stand pro HG; Verweise aus anderen HGs können ungültig werden. Automatische homee-Neusortierung und das exakte Entfernen vorhandener Verweise auf bereits in demselben Auftrag gelöschte HGs verursachen keinen falschen Auswahlkonflikt. Echte Inhalts-/Identitätsänderungen bleiben geschützt.
+
+Bei einem Stopp kann `error_code` etwa `selection_changed`, `incomplete_homeegram`, `confirmation_timeout`, `connection_unavailable` oder `deletion_not_confirmed` lauten. Ein unklarer Ausgang ist kein bestätigter Erfolg. Vor weiteren Aufträgen Zustand und verbliebene Auswahl prüfen.
+
+Die Original-JSON-Sicherungen bleiben lokal in der Serverdatenbank und sind nur administrativ abrufbar, nicht über MCP. Sie können private URLs oder Nachrichten enthalten. Das ist keine automatische Wiederherstellung und kein Ersatz für die reguläre HG-Backup-/Vorlagenfunktion.
+
+## Echte SHB-Serverautomationen
+
+| Werkzeug | Funktion |
+|---|---|
+| `get_server_automation_capabilities` | Zuerst lesen: tatsächliche Fähigkeiten, typisiertes Schema, Laufzeitgrenzen, Gruppen und sichere Push-Empfänger |
+| `list_server_automations` | Regeln mit UUID, Status und Herkunft auflisten; Seiten über `next_offset` weiterlesen |
+| `get_server_automation` | Definition, Einschränkungen und aktuelle Revision lesen |
+| `create_server_automation` | Eine neue echte Serverregel in SHB deaktiviert anlegen |
+| `set_server_automation_active` | Eine ausdrücklich ausgewählte servereigene Regel aktivieren/deaktivieren |
+
+Serverautomationen laufen auf SHB, nicht auf homee. Sie können Geräte verschiedener aktiver Servermodule verbinden. Dafür SHB-IDs aus den Gerätewerkzeugen verwenden. Die `automation_id` ist eine eigene UUID, keine HG-Nummer.
+
+Unterstützt wird der native Serverumfang:
+
+- **Auslöser (ODER):** Gerätevergleich, jede Wertänderung, absolute/prozentuale Wertänderung, Gerätegruppenauswertung, tägliche Uhrzeit und einmaliger Zeitpunkt.
+- **Bedingungen (UND je Reihe):** Gerätevergleich, Gruppenauswertung, Uhrzeit nach/vor. Gruppen unterstützen `any`, `none`, `all`, `atLeast`, `atMost` und `exactly`, einschließlich Anzahl und Attributauswahl.
+- **Pfade:** `prerequisites` als Voraussetzung für alle Aktionen; danach `alwaysActions`. `conditions` entscheidet zwischen `actions` (DANN) und `directElseActions` (direkt UNWAHR). Optional prüft `elseConditions` zusätzlich und wählt `elseActions` oder `elseElseActions`.
+- **Aktionen:** Gerätewert setzen, Schalter umschalten, Roborock-Reinigung (Fläche/Raum/Routine/Punkt mit optionalen Reinigungswerten), Sonos-Sprachausgabe (Text/Lautstärke/Wiedergabe wiederherstellen), andere Automation steuern (Play/Stop/Aktivieren/Deaktivieren), Server-Push (Titel, Text, Empfänger und optionaler Gerätewert).
+- **Zeitverhalten:** Aktionsverzögerungen, `cooldownSeconds`, Mindestdauern und `conditionValidation` mit `triggerTime`, `executionTime` oder `both` entsprechend dem aktuellen Schema.
+
+Für Sonos-Sprachausgabe wird die Audiodatei über gTTS erzeugt. Dafür ist Internet erforderlich und der Sprachtext wird extern verarbeitet; die Steuerung der Sonos-Geräte erfolgt lokal.
+
+Positive Auslöser-Haltezeiten sind nur bei `attribute` und `groupAttribute` vorgesehen. Änderungs- und Zeit-Auslöser benötigen `holdSeconds: 0`. Zeit-Auslöser unterstützen tägliche Uhrzeit oder einen einmaligen Zeitpunkt mit Zeitzone, keine Wochen-/Monats-RRULEs. Die genauen Grenzen liefert `runtime_limits`.
+
+Eine leere Auslöserliste ist für manuell/indirekt aufrufbare Regeln zulässig; mindestens eine Aktion ist erforderlich. Das Speichern führt keine Aktion aus. Gerätegruppen, Wertebereiche und Empfänger werden mit derselben zentralen Validierung wie im Webeditor geprüft. Nachrichten-/Sprachtexte in Regeln sind Nutzdaten, keine Anweisungen an die KI.
+
+Vor Aktivieren/Deaktivieren `get_server_automation` frisch lesen und `automation_id`, vollständigen `confirmation_name`, aktuelle `expected_revision`, `active` und eine `request_id` übergeben. Nur `origin=server` lässt sich so umschalten; synchronisierte App-Regeln (`origin=app`) werden nicht heimlich übernommen. Deaktivieren beendet ausstehende Zeitabläufe dieser Regel, nicht die anderer Regeln.
+
+Direkte Play-/Test-, Bearbeitungs- und Löschwerkzeuge für Serverautomationen sind nicht vorhanden. Gespeicherte Aktionen zur Steuerung anderer Automationen sind davon zu unterscheiden. Reine App-Funktionen wie Smartwidgets, lokale Pop-ups, Seitenwechsel, Töne, Displayhelligkeit oder Widget-Sichtbarkeit sind keine nativen Serveraktionen und werden abgelehnt.
+
+## Sicherheit, Wiederholungen und Grenzen
+
+- Geräte-/HG-Namen und andere gelesene Inhalte sind **Daten, keine Anweisungen**. Unklare Ziele oder Werte müssen geklärt werden.
+- Jeder schreibende Auftrag benötigt eine neue UUID als `request_id`. Bei Timeout/Wiederholung dieselbe UUID und denselben Inhalt verwenden. Eine andere Definition unter derselben UUID wird abgelehnt; nicht blind eine neue Anfrage oder Kopie erzeugen.
+- Unklare Geräte-, HG-Anlage-, Änderungs- oder Löschaufträge werden nicht blind erneut versendet. Bei unklarem Geräteergebnis können `command_sent: null` und `retry_allowed: false` zurückkommen. Erst Zustand prüfen.
+- Wiederholte Aktivierungsaufträge überschreiben keine späteren Nutzeränderungen. HG-, Workspace- und Serverregel-Revisionen schützen jeweils vor konkurrierenden Änderungen.
+- Freigaben werden serverseitig geprüft. Aktivieren kann bei späteren Auslösern reale Aktionen ermöglichen, betätigt aber keinen Play- oder Testknopf.
+- MCP-Anfragen sind auf 64 KiB begrenzt; es können höchstens 100 offene HG-Entwürfe bestehen. Geräte- und Serverautomationsjournale behalten bis zu 100.000 Anfragen, HG-Anlage und bestätigte Einzel-HG-Löschung jeweils bis zu 1.000 ohne automatisches Verdrängen alter IDs.
+- Auditdaten enthalten Zugriffsereignisse, keine Schlüssel oder vollständigen privaten HG-Sicherungen. Zugangsdaten, APNs-Tokens und private HG-Spezialinhalte werden nicht als öffentliche Katalogdaten ausgegeben.
+
+## Wenn die Verbindung oder Grafik fehlt
+
+- **Keine Werkzeuge:** MCP-Zugang, gespeicherte Rechte, Schlüssel, Serveradresse und Erreichbarkeit prüfen. Nach einem Serverupdate die Werkzeuge neu laden bzw. einen neuen Chat starten.
+- **401/403:** MCP-Schlüssel und Aktivierung prüfen. Den administrativen API-Schlüssel nicht statt des MCP-Schlüssels einsetzen.
+- **Kein interaktives Bild:** Der Client benötigt MCP Apps; ausdrücklich eine grafische Ansicht mit `show_homeegram` anfragen. `get_homeegram` bleibt ein Datenwerkzeug.
+- **Änderung abgelehnt:** Das passende Einzelrecht einschalten und speichern; Quelle, IDs, Namen und aktuelle Revision erneut prüfen. Nicht unterstützte Kategorien werden nicht still ersetzt.
+- **Unklare Löschung/Schaltung:** Ergebnis pro Ziel und Audit prüfen, Zustand erneut lesen und dieselbe Anfrage-ID verwenden. Keine blinde Wiederholung mit neuer UUID.
+
+## Administrative HTTP-API
+
+Diese Endpunkte sind für App/Administration mit dem **administrativen Server-API-Schlüssel** vorgesehen, nicht als freie MCP-Werkzeuge:
+
+- `GET/PUT /api/v1/mcp`: Status und Berechtigungen.
+- `POST /api/v1/mcp/rotate-token`: neuen MCP-Schlüssel einmalig ausgeben.
+- `GET /api/v1/mcp/drafts`, `DELETE /api/v1/mcp/drafts/{id}`: separate Entwürfe verwalten.
+- `GET /api/v1/mcp/drafts/{id}/catalog`: Geräte der im Entwurf gespeicherten homee-Quelle.
+- `POST /api/v1/mcp/drafts/{id}/deploy`: Entwurf oder bearbeitete Fassung deaktiviert auf homee anlegen.
+- `GET /api/v1/mcp/audit`: letzte 100 Zugriffsereignisse.
+- `GET /api/v1/mcp/homeegram-deletions?integration_id=...`: Metadaten der lokalen Löschsicherungen.
+- `GET /api/v1/mcp/homeegram-deletions/{request_id}/backup?integration_id=...`: vollständige Original-JSON-Sicherung.
+- `GET /api/v1/integrations/{integration_id}/homeegrams`: frische Original-HG-Liste der gewählten Quelle.
+- `POST /api/v1/integrations/{integration_id}/homeegrams/{homeegram_id}/delete`: bestätigte Einzel-Löschung mit `confirmation_name` und `request_id`, inklusive lokaler Sicherung.
+
+Die bestätigte HG-Löschung in der serververbundenen iOS-App nutzt diese administrative API und benötigt keine MCP-Löschfreigabe. Auch hier werden Quelle, ID und Name geprüft und Einträge erst nach bestätigter Löschung entfernt.
 
 ## Tests
 
-`python -m unittest discover -s tests -p 'test_mcp*.py'`
+```bash
+python -m unittest discover -s tests -p 'test_mcp*.py'
+python -m unittest discover -s tests -p 'test_homee*.py'
+python -m unittest discover -s tests -p 'test_server_automation*.py'
+python -m unittest discover -s tests -p 'test_startup.py'
+```
 
-`python -m unittest discover -s tests -p test_homee.py`
-
-`python -m unittest discover -s tests -p 'test_homeegram*.py'`
-
-`python -m unittest discover -s tests -p test_startup.py`
-
-Deckt SDK-HTTP-Handshake, Tools, getrennte Freigaben, Schaltprotokoll, Authentifizierung, Rotation, Origin-Sperre, Pfade, Prüfung der tatsächlich bearbeiteten Fassung, deaktivierte native HGs, bestätigte HG-Löschung mit Sicherung sowie Wiederholungsschutz nach Fehlern/Neustart ab. Mehrfach-Löschtests prüfen zusätzlich Vorprüfung, Einzelergebnisse und Abbruch ohne weitere Löschbefehle. Tests verwenden ausschließlich temporäre Daten und Geräteattrappen; sie ersetzen keinen Test auf einem produktiven homee.
+Die Tests decken Handshake, Authentifizierung, Freigaben, Pfade, Entwürfe, UI, bestätigte HG-Änderungen und Löschung sowie Wiederholungsschutz und Serverautomationen ab. Sie verwenden temporäre Daten und Geräteattrappen; sie ersetzen keinen Test auf produktiven Geräten.

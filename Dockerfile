@@ -6,6 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SHB_MODULE_DIR=/app/modules
 
 WORKDIR /app
+COPY LICENSE THIRD_PARTY_NOTICES.md ./
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY server ./server

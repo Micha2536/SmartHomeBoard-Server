@@ -41,6 +41,44 @@ git pull
 docker compose up -d --build
 ```
 
+## KI-Anbindung mit MCP
+
+MCP verbindet eine externe KI-Anwendung mit dem SHB-Server. Die KI erhält Werkzeuge für freigegebene Serverdaten und Aktionen; ein eigenes KI-Modell wird nicht auf dem SHB-Server betrieben.
+
+### Einrichten
+
+1. Server und iOS-App aktualisieren und die App unter **Lokaler Server** verbinden. Der vollständige hier beschriebene Umfang benötigt mindestens Server **0.20.26** und App-Build **318**.
+2. In der App **Lokaler Server → KI-Anbindung → MCP-Zugang und HG-Entwürfe** öffnen. **MCP-Zugang aktivieren** einschalten, gewünschte Rechte auswählen und **Berechtigungen speichern** drücken.
+3. Einen **MCP-Schlüssel** erstellen und sofort sicher kopieren. Er wird nur einmal angezeigt und ist vom administrativen Server-API-Schlüssel getrennt.
+4. Im KI-Client eine Verbindung mit **Streamable HTTP** anlegen:
+
+   - Adresse: die in der App angezeigte MCP-Adresse, normalerweise `http://SERVER-IP:8787/mcp/`.
+   - HTTP-Header: `Authorization: Bearer <MCP-Schlüssel>`.
+5. Die Werkzeugliste neu laden oder einen neuen Chat starten. Zum Testen zunächst „Zeige meine Geräte“ anfragen.
+
+Der KI-Client muss eigene Bearer-Header unterstützen; OAuth-Anmeldung ist derzeit nicht implementiert. Den Schlüssel nicht als Chatnachricht versenden oder in GitHub ablegen.
+
+### Was ist möglich?
+
+- Geräte und Zustände lesen sowie Homeegramme mit aufgelösten Geräte- und Gruppennamen erklären.
+- Homeegramme grafisch ansehen und Entwürfe gemeinsam mit der KI bearbeiten; dafür muss der Client **MCP Apps** unterstützen. Reine Text-MCP-Clients zeigen keine interaktive Oberfläche.
+- Neue Homeegramme deaktiviert auf homee anlegen; vorhandene HGs gezielt bearbeiten, aktivieren/deaktivieren oder einzeln bzw. mehrere ausdrücklich ausgewählte HGs löschen.
+- Freigegebene An/Aus-Geräte einschalten, ausschalten oder umschalten.
+- Echte SHB-Serverautomationen mit den nativ unterstützten Auslösern, Bedingungen, Pfaden und Aktionen deaktiviert anlegen sowie separat aktivieren/deaktivieren. Sie laufen auf dem Server und können Geräte verschiedener Servermodule verbinden; Homeegramme laufen dagegen auf homee.
+
+Schreibrechte sind einzeln freizugeben und standardmäßig aus. Neue Homeegramme und Serverautomationen werden **deaktiviert** gespeichert; bearbeitete HGs bleiben ebenfalls deaktiviert. Aktivieren ist ein eigener bewusster Auftrag und kein Play-Befehl. Nicht jede Möglichkeit des regulären App-Editors steht auch als MCP-Werkzeug bereit; die genauen Grenzen stehen in der [MCP-Anleitung](MCP.md).
+
+### Beispielaufträge an die KI
+
+- „Erkläre mir die Auslöser, Bedingungen und Aktionen von Homeegramm 503.“
+- „Erstelle ein deaktiviertes Homeegramm: Bei Bewegung im Flur den ausgewählten Flurspot einschalten. Zeige mir vorher die Geräte und den Ablauf.“
+- „Öffne den Homeegramm-Entwurf grafisch, damit wir ihn gemeinsam bearbeiten können.“
+- „Lege eine deaktivierte Serverautomation an: Wenn der ausgewählte Sensor Bewegung meldet, schalte die ausgewählte Shelly-Lampe ein.“
+
+Nur serverseitig vorhandene Daten werden bereitgestellt. Messwerte können Cachewerte sein; HomeKit-/Matter-Daten, die nur in der iOS-App vorliegen, werden nicht automatisch geteilt. Cloud-KI-Anbieter erhalten die angefragten Hausdaten. Der Client muss den Server erreichen können; eine private LAN-Adresse ist aus einer Cloud-KI nicht direkt erreichbar. Für entfernten Zugriff HTTPS über einen abgesicherten Zugang verwenden, keine ungeschützte Portfreigabe.
+
+Zugriff und einzelne Rechte lassen sich in der App wieder entziehen; ein neuer Schlüssel widerruft den bisherigen. Details zu Werkzeugen, Freigaben, gemeinsamer Grafikansicht und Sicherheit: [MCP.md](MCP.md).
+
 ## Integrationen einrichten
 
 Integrationen werden im Webportal unter **Integrationen** oder in der iOS-App unter **Lokaler Server** angelegt. Nicht benötigte Geräte können dort deaktiviert werden; ihre Werte bleiben erhalten.
@@ -81,6 +119,8 @@ Die SingleKey-ID-Zugangsdaten bleiben ausschließlich bei Home Connect; der SHB-
 - Das Sonos-Modul benötigt kein Cloudkonto und findet Lautsprecher per SSDP im lokalen Netz.
 - Wenn Docker oder ein VLAN Multicast blockiert, die IP-Adressen der Lautsprecher im Modul hinterlegen.
 - Wiedergabe/Pause, Lautstärke, Stumm, Stop, Titel vor/zurück, Gruppenlautstärke, Bass, Höhen und Loudness stehen als schreibbare Attribute für Serverautomationen bereit.
+
+Für Sprachausgabe wird die Audiodatei über gTTS erzeugt. Dafür ist Internet erforderlich und der Sprachtext wird extern verarbeitet; die Gerätesteuerung erfolgt lokal.
 
 ### Roborock
 
@@ -202,3 +242,11 @@ Automationen können im Webportal oder in der App erstellt werden. Serverfähige
 - Diese Ordner und Dateien niemals bei GitHub veröffentlichen.
 - Serverports nicht direkt ins Internet freigeben; für externen Zugriff VPN oder TLS-Reverse-Proxy verwenden.
 - API-Schlüssel, Zugangsdaten und APNs-Schlüssel nur im lokalen Server hinterlegen.
+
+## Lizenz und Drittanbieter
+
+Der eigene Projektcode und die eigene Dokumentation von Michael Mann stehen unter der [MIT-Lizenz](LICENSE), Copyright © 2026 Michael Mann. MIT erlaubt auch kommerzielle Weiterverwendung dieses eigenen Codes.
+
+Abhängigkeiten, übernommene homee-Kataloginhalte und andere Fremdbestandteile behalten ihre eigenen Bedingungen. Insbesondere wird **Mutagen unter GPL-2.0-or-later** verwendet; das kombinierte Serverpaket ist daher nicht pauschal ausschließlich MIT-lizenziert. Die in der zugehörigen App verwendeten **homee-Grafiken sind mit Genehmigung der homee GmbH integriert** und werden durch die MIT-Lizenz nicht allgemein freigegeben.
+
+Siehe [Lizenzumfang und Drittanbieterhinweise](THIRD_PARTY_NOTICES.md), einschließlich Python-Bibliotheken und M5Paper-Frameworks.
