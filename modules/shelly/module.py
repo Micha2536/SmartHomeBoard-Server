@@ -16,6 +16,9 @@ from server.shelly_discovery import discover_shelly_ipv4
 
 log = logging.getLogger("smarthomeboard.shelly")
 RPC_SOURCE = "smarthomeboard-server"
+WS_INITIAL_DELAY_SECONDS = 20.0
+WS_RECONNECT_MIN_SECONDS = 15.0
+WS_RECONNECT_MAX_SECONDS = 17.0
 BLE_SCRIPT_NAME = "SmartHomeBoard BLE v1"
 BLE_SCANNER_SCRIPT = '''// SmartHomeBoard BTHome relay v1
 const BTHOME_SERVICE = "fcd2";
@@ -81,7 +84,7 @@ def manifest():
     return {
         "id": "shelly",
         "name": "Shelly Gen2+ / BLU",
-        "version": "1.0.0",
+        "version": "1.0.2",
         "icon": "dot.radiowaves.left.and.right",
         "description": (
             "Erkennt Shelly Gen2, Gen3 und Gen4 per mDNS, hält pro Gerät eine RPC-WebSocket-Verbindung "
@@ -96,7 +99,7 @@ def manifest():
              "help": "Ergänzung, falls Multicast/mDNS zwischen Docker und dem LAN gefiltert wird."},
             {"key": "password", "type": "password", "title": "Shelly-Gerätepasswort (optional)",
              "help": "Benutzer ist bei Shelly Gen2+ immer admin. Das Passwort wird getrennt als Server-Secret gespeichert."},
-            {"key": "scan_seconds", "type": "duration", "title": "Netzwerkscan", "default": 60,
+            {"key": "scan_seconds", "type": "duration", "title": "Netzwerkscan", "default": 300,
              "minimum": 20, "maximum": 3600, "unit": "s"},
         ],
         "actions": [
@@ -128,6 +131,9 @@ class ShellyAdapter:
         self.host_to_device = {}
         self.ws_tasks = {}
         self.ws_connections = {}
+        self.ws_generations = {}
+        self.websocket_not_before = time.monotonic() + WS_INITIAL_DELAY_SECONDS
+        self.websocket_rpc_source = f"shb-{random.getrandbits(48):012x}"
         self.ws_diagnostics = []
         self.discovery_request_ids = {}
         self.ble_script_ready = set()
@@ -145,8 +151,31 @@ class ShellyAdapter:
         self.attribute_offsets = state.get("attribute_offsets", {}) if isinstance(state.get("attribute_offsets", {}), dict) else {}
         self.next_attribute_offset = max([int(value) for value in self.attribute_offsets.values()] + [0]) + 1
         self.blu_values = state.get("blu_values", {}) if isinstance(state.get("blu_values", {}), dict) else {}
+        self.disabled_gateways = set(state.get("disabled_gateways", [])) if isinstance(state, dict) else set()
+        self.ignored_gateways = set(state.get("ignored_gateways", [])) if isinstance(state, dict) else set()
+        self.disabled_node_ids = {str(value) for value in state.get("disabled_node_ids", [])} if isinstance(state, dict) else set()
+        self.ignored_node_ids = {str(value) for value in state.get("ignored_node_ids", [])} if isinstance(state, dict) else set()
+        self.gateway_nodes = dict(state.get("gateway_nodes", {})) if isinstance(state.get("gateway_nodes", {}), dict) else {}
         self.startup_status = "Shelly-Suche läuft"
         self.startup_error = None
+
+    def connection_status(self):
+        rows = []
+        for device_id, gateway in self.gateways.items():
+            host = str(gateway.get("host", ""))
+            rows.append({
+                "id": f"shelly:{device_id}", "protocol": "WebSocket", "direction": "Ausgehend",
+                "endpoint": f"ws://{host}/rpc", "peer": self._gateway_name(gateway),
+                "state": "Deaktiviert" if device_id in self.disabled_gateways else "Verbunden" if gateway.get("ws_connected") else "Verbindung wird aufgebaut",
+                "error": "",
+            })
+        if not rows:
+            rows.append({
+                "id": "shelly:discovery", "protocol": "WebSocket", "direction": "Ausgehend",
+                "endpoint": "Shelly RPC · ws://<Geräte-IP>/rpc", "peer": "Shelly-Gerätesuche",
+                "state": "Noch kein Gerät erkannt", "error": "",
+            })
+        return rows
 
     async def start(self):
         supplied_password = str(self.configuration.get("password", "")).strip()
@@ -173,13 +202,113 @@ class ShellyAdapter:
             await self.http.aclose()
 
     async def health_check(self):
-        count = await self._refresh_discovery()
+        count = await self._refresh_discovery(refresh_existing=True)
         if not count:
             raise ConnectionError("Keine Shelly Gen2+/Gen3/Gen4-Geräte im lokalen Netz gefunden")
 
+    async def set_device_enabled(self, node_id, enabled):
+        node_key = str(int(node_id))
+        match = self._gateway_for_node(node_id)
+        if not match:
+            if enabled:
+                self.disabled_node_ids.discard(node_key)
+                mapped = self.gateway_nodes.get(node_key, {})
+                self.disabled_gateways.discard(str(mapped.get("device_id", "")))
+            else:
+                self.disabled_node_ids.add(node_key)
+            self._save_state()
+            return
+        device_id, gateway = match
+        if enabled:
+            self.disabled_node_ids.discard(node_key)
+            self.disabled_gateways.discard(device_id)
+            self.ignored_gateways.discard(device_id)
+            self._start_gateway_websocket(device_id, gateway["host"])
+        else:
+            self.disabled_node_ids.add(node_key)
+            self.disabled_gateways.add(device_id)
+            await self._stop_gateway_websocket(device_id, "Deaktiviert")
+        self._save_state()
+
+    async def delete_device(self, node_id):
+        node_key = str(int(node_id))
+        self.ignored_node_ids.add(node_key)
+        self.disabled_node_ids.discard(node_key)
+        match = self._gateway_for_node(node_id)
+        if match:
+            device_id, gateway = match
+            self.ignored_gateways.add(device_id)
+            self.disabled_gateways.discard(device_id)
+            await self._stop_gateway_websocket(device_id, "Gelöscht")
+            self.context.remove_connection(f"shelly:{device_id}")
+            self.host_to_device.pop(str(gateway.get("host", "")), None)
+            self.gateways.pop(device_id, None)
+            self.attribute_controls = {
+                key: value for key, value in self.attribute_controls.items()
+                if int(value.get("node_id", -1)) != int(node_id)
+            }
+            self._save_state()
+            return
+        for mac in list(self.learned_blu):
+            if self.context.stable_node_id(f"bthome:{mac}") == int(node_id):
+                await asyncio.gather(
+                    *(self._unregister_blu(gateway, mac) for gateway in self.gateways.values()),
+                    return_exceptions=True,
+                )
+                self.learned_blu.pop(mac, None)
+                self.blu_values.pop(mac, None)
+                self.context.save_secret(_blu_secret_name(mac), "")
+                self._save_state()
+                return
+        mapped = self.gateway_nodes.get(node_key, {})
+        mapped_device_id = str(mapped.get("device_id", ""))
+        if mapped_device_id:
+            self.ignored_gateways.add(mapped_device_id)
+            self.disabled_gateways.discard(mapped_device_id)
+            await self._stop_gateway_websocket(mapped_device_id, "Gelöscht")
+            self.context.remove_connection(f"shelly:{mapped_device_id}")
+        self._save_state()
+
+    def _gateway_for_node(self, node_id):
+        for device_id, gateway in self.gateways.items():
+            mac = str(gateway.get("info", {}).get("mac") or gateway.get("info", {}).get("id") or device_id).lower()
+            if self.context.stable_node_id(f"shelly:{mac}") == int(node_id):
+                return device_id, gateway
+        return None
+
+    async def _stop_gateway_websocket(self, device_id, state):
+        self.ws_generations[device_id] = self.ws_generations.get(device_id, 0) + 1
+        task = self.ws_tasks.pop(device_id, None)
+        if task:
+            log.info("Shelly-WebSocket %s wird beendet: %s", device_id, state)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        socket = self.ws_connections.pop(device_id, None)
+        if socket:
+            with contextlib.suppress(Exception):
+                await socket.close()
+        if device_id in self.gateways:
+            self.gateways[device_id]["ws_connected"] = False
+        self.context.report_connection(f"shelly:{device_id}", state=state, error="")
+
+    def _start_gateway_websocket(self, device_id, host):
+        current = self.ws_tasks.get(device_id)
+        if current and not current.done():
+            log.debug("Shelly-WebSocket %s läuft bereits; kein zweiter Task für %s", device_id, host)
+            return False
+        generation = self.ws_generations.get(device_id, 0) + 1
+        self.ws_generations[device_id] = generation
+        task = asyncio.create_task(
+            self._websocket_loop(device_id, host, generation),
+            name=f"shelly-ws:{device_id}:{generation}",
+        )
+        self.ws_tasks[device_id] = task
+        log.info("Shelly-WebSocket %s Generation %d für %s angelegt", device_id, generation, host)
+        return True
+
     async def action(self, action_id, payload):
         if action_id == "refresh":
-            count = await self._refresh_discovery()
+            count = await self._refresh_discovery(refresh_existing=True)
             return {"status": "refreshed", "gateways": count, **self._management()}
         if action_id == "get_management":
             return self._management()
@@ -222,7 +351,6 @@ class ShellyAdapter:
         else:
             raise ValueError("Dieses Shelly-Attribut ist nicht schreibbar")
         await self._rpc(control["host"], method, params)
-        await self._reload_gateway(control["host"])
 
     async def _discovery_loop(self):
         while True:
@@ -231,14 +359,11 @@ class ShellyAdapter:
                 count = await self._refresh_discovery()
                 await self.context.set_status(f"Verbunden · {count} Shelly-Geräte")
             except asyncio.CancelledError:
-                self.ws_connections.pop(device_id, None)
-                if device_id in self.gateways:
-                    self.gateways[device_id]["ws_connected"] = False
                 return
             except Exception as error:
                 await self.context.set_status("Shelly-Suche gestört", str(error))
 
-    async def _refresh_discovery(self):
+    async def _refresh_discovery(self, refresh_existing=False):
         manual = re.split(r"[,;\s]+", str(self.configuration.get("manual_hosts", "")))
         hosts = {item.strip() for item in manual if item.strip()}
         try:
@@ -246,19 +371,48 @@ class ShellyAdapter:
         except OSError as error:
             log.warning("Shelly-mDNS-Suche fehlgeschlagen: %s", error)
         hosts = sorted(hosts)
-        results = await asyncio.gather(*(self._ensure_gateway(host) for host in hosts), return_exceptions=True)
+        results = await asyncio.gather(
+            *(self._ensure_gateway(host, refresh_existing=refresh_existing) for host in hosts),
+            return_exceptions=True,
+        )
         for host, result in zip(hosts, results):
             if isinstance(result, Exception):
                 log.debug("Shelly %s wurde übersprungen: %s", host, result)
         return len(self.gateways)
 
-    async def _ensure_gateway(self, host):
+    async def _ensure_gateway(self, host, refresh_existing=False):
+        # Ein laufender Geräte-Task hält den WebSocket selbst am Leben und
+        # übernimmt auch einen nötigen Reconnect. Währenddessen keinerlei
+        # Hintergrund-RPC oder erneuten Geräteabruf an diesen Shelly senden.
+        known_device_id = self.host_to_device.get(host)
+        known_task = self.ws_tasks.get(known_device_id) if known_device_id else None
+        if known_device_id and known_device_id in self.gateways and known_task and not known_task.done() and not refresh_existing:
+            return known_device_id
         info = await self._device_info(host)
         generation = int(_number(info.get("gen")))
         if generation not in (2, 3, 4):
             raise ValueError("Kein Shelly Gen2+/Gen3/Gen4")
         device_id = str(info.get("id") or info.get("mac") or host).lower()
+        mac = str(info.get("mac") or info.get("id") or device_id).lower()
+        node_key = str(self.context.stable_node_id(f"shelly:{mac}"))
+        self.gateway_nodes[node_key] = {"device_id": device_id, "host": host}
+        if node_key in self.ignored_node_ids:
+            self.ignored_gateways.add(device_id)
+            self._save_state()
+        if device_id in self.ignored_gateways:
+            return device_id
+        if node_key in self.disabled_node_ids:
+            self.disabled_gateways.add(device_id)
         old_host = self.gateways.get(device_id, {}).get("host")
+        current = self.ws_tasks.get(device_id)
+        if old_host == host and not refresh_existing:
+            self.host_to_device[host] = device_id
+            if device_id in self.disabled_gateways:
+                if current:
+                    await self._stop_gateway_websocket(device_id, "Deaktiviert")
+            else:
+                self._start_gateway_websocket(device_id, host)
+            return device_id
         if old_host and old_host != host:
             self.host_to_device.pop(old_host, None)
         self.host_to_device[host] = device_id
@@ -278,10 +432,13 @@ class ShellyAdapter:
                     await self._register_blu(gateway, mac)
             await self._reload_gateway(host)
         current = self.ws_tasks.get(device_id)
-        if not current or current.done() or old_host != host:
+        if device_id in self.disabled_gateways:
             if current:
-                current.cancel()
-            self.ws_tasks[device_id] = asyncio.create_task(self._websocket_loop(device_id, host))
+                await self._stop_gateway_websocket(device_id, "Deaktiviert")
+        elif not current or current.done() or old_host != host:
+            if current:
+                await self._stop_gateway_websocket(device_id, "Adresse geändert")
+            self._start_gateway_websocket(device_id, host)
         return device_id
 
     async def _device_info(self, host):
@@ -294,12 +451,13 @@ class ShellyAdapter:
 
     async def _load_gateway(self, host, info=None):
         info = info or await self._device_info(host)
-        status, config, components, method_result = await asyncio.gather(
-            self._rpc(host, "Shelly.GetStatus"),
-            self._rpc(host, "Shelly.GetConfig"),
-            self._get_components(host),
-            self._rpc(host, "Shelly.ListMethods"),
-        )
+        # Shelly erlaubt nur wenige gleichzeitige nicht-persistente RPC-Kanäle.
+        # Diese Abfragen deshalb bewusst seriell ausführen, damit Weboberfläche
+        # und andere Integrationen nicht durch einen SHB-Request-Burst verdrängt werden.
+        status = await self._rpc(host, "Shelly.GetStatus")
+        config = await self._rpc(host, "Shelly.GetConfig")
+        components = await self._get_components(host)
+        method_result = await self._rpc(host, "Shelly.ListMethods")
         device_id = str(info.get("id") or info.get("mac") or host).lower()
         gateway = self.gateways.setdefault(device_id, {})
         for item in components:
@@ -447,15 +605,53 @@ class ShellyAdapter:
         self._save_state()
         await self._publish_blu(mac)
 
-    async def _websocket_loop(self, device_id, host):
-        delay = 1
-        while True:
+    async def _websocket_loop(self, device_id, host, generation):
+        task = asyncio.current_task()
+        attempt = 0
+        initial_delay = max(0.0, self.websocket_not_before - time.monotonic())
+        if initial_delay > 0:
+            log.info(
+                "Shelly-WebSocket %s Generation %d wartet vor dem ersten Verbindungsaufbau %.1f s",
+                device_id, generation, initial_delay,
+            )
+            self.context.report_connection(
+                f"shelly:{device_id}", protocol="WebSocket", direction="Ausgehend",
+                endpoint=f"ws://{host}/rpc", peer=self._gateway_name(self.gateways[device_id]),
+                state="Startverzögerung", error="",
+            )
             try:
-                async with websockets.connect(f"ws://{host}/rpc", open_timeout=8, ping_interval=25, ping_timeout=10) as socket:
+                await asyncio.sleep(initial_delay)
+            except asyncio.CancelledError:
+                log.info("Shelly-WebSocket %s wurde während der Startverzögerung beendet", device_id)
+                return
+        while self.ws_generations.get(device_id) == generation and self.ws_tasks.get(device_id) is task:
+            socket = None
+            connected_at = None
+            attempt += 1
+            try:
+                log.info(
+                    "Shelly-WebSocket %s Generation %d Verbindungsversuch %d zu %s",
+                    device_id, generation, attempt, host,
+                )
+                self.context.report_connection(
+                    f"shelly:{device_id}", protocol="WebSocket", direction="Ausgehend",
+                    endpoint=f"ws://{host}/rpc", peer=self._gateway_name(self.gateways[device_id]),
+                    state="Verbindung wird aufgebaut", error="",
+                )
+                # Shelly sendet selbst regelmäßig Status-/Event-Nachrichten. Zusätzliche
+                # RFC-WebSocket-Pings können einzelne Geräte bzw. andere lokale Clients
+                # stören und werden deshalb für diese Geräteverbindung nicht erzeugt.
+                async with websockets.connect(
+                    f"ws://{host}/rpc", open_timeout=8, ping_interval=None
+                ) as socket:
+                    connected_at = time.monotonic()
+                    log.info(
+                        "Shelly-WebSocket %s Generation %d zu %s geöffnet (automatische Pings aus)",
+                        device_id, generation, host,
+                    )
                     request_id = random.randint(1, 2_000_000_000)
-                    request = {"id": request_id, "src": RPC_SOURCE, "method": "Shelly.GetStatus"}
+                    request = {"id": request_id, "src": self.websocket_rpc_source, "method": "Shelly.GetStatus"}
                     await socket.send(json.dumps(request, separators=(",", ":")))
-                    delay = 1
                     async for raw in socket:
                         message = json.loads(raw)
                         if message.get("id") == request_id and _error_code(message) == 401:
@@ -463,25 +659,60 @@ class ShellyAdapter:
                                 raise PermissionError(f"Shelly {host} verlangt ein Gerätepasswort")
                             challenge = json.loads(message["error"]["message"])
                             request_id += 1
-                            authenticated = {"id": request_id, "src": RPC_SOURCE, "method": "Shelly.GetStatus",
+                            authenticated = {"id": request_id, "src": self.websocket_rpc_source, "method": "Shelly.GetStatus",
                                              "auth": _websocket_auth(challenge, self.password)}
                             await socket.send(json.dumps(authenticated, separators=(",", ":")))
                             continue
                         if message.get("id") == request_id and not message.get("error"):
+                            if self.ws_generations.get(device_id) != generation or self.ws_tasks.get(device_id) is not task:
+                                log.info("Veralteter Shelly-WebSocket %s Generation %d wird verworfen", device_id, generation)
+                                return
                             self.ws_connections[device_id] = socket
                             if device_id in self.gateways:
                                 self.gateways[device_id]["ws_connected"] = True
+                            self.context.report_connection(
+                                f"shelly:{device_id}", state="Verbunden", error="", message_received=True,
+                            )
+                        else:
+                            self.context.report_connection(f"shelly:{device_id}", message_received=True)
                         await self._handle_websocket_message(device_id, message)
+                    close_code = getattr(socket, "close_code", None)
+                    close_reason = getattr(socket, "close_reason", None) or "ohne Close-Grund"
+                    raise ConnectionError(
+                        f"Shelly hat den WebSocket beendet (Code {close_code}, Grund: {close_reason})"
+                    )
             except asyncio.CancelledError:
+                log.info("Shelly-WebSocket %s Generation %d zu %s wurde kontrolliert beendet", device_id, generation, host)
+                self.context.report_connection(f"shelly:{device_id}", state="Beendet")
                 return
             except Exception as error:
-                log.warning("Shelly-WebSocket %s getrennt: %s", host, error)
-                if self.ws_connections.get(device_id) is not None:
+                duration = time.monotonic() - connected_at if connected_at is not None else 0.0
+                close_code = getattr(error, "code", None)
+                close_reason = getattr(error, "reason", None)
+                log.warning(
+                    "Shelly-WebSocket %s Generation %d Versuch %d nach %.1f s getrennt: "
+                    "Code=%s Grund=%s Fehler=%s",
+                    host, generation, attempt, duration, close_code, close_reason, error,
+                )
+                if self.ws_generations.get(device_id) != generation or self.ws_tasks.get(device_id) is not task:
+                    return
+                if self.ws_connections.get(device_id) is socket:
                     self.ws_connections.pop(device_id, None)
                 if device_id in self.gateways:
                     self.gateways[device_id]["ws_connected"] = False
+                detail = str(error)
+                if close_code is not None:
+                    detail = f"Code {close_code}" + (f" · {close_reason}" if close_reason else "")
+                self.context.report_connection(f"shelly:{device_id}", state="Getrennt", error=detail)
+                # Andere lokale Clients erhalten Zeit, ihren Kanal sauber
+                # wiederherzustellen. Vor 15 Sekunden findet kein neuer Versuch statt;
+                # kleine Streuung verhindert gleichzeitige Reconnects aller Geräte.
+                delay = random.uniform(WS_RECONNECT_MIN_SECONDS, WS_RECONNECT_MAX_SECONDS)
+                log.info("Shelly-WebSocket %s: neuer Versuch frühestens in %.1f s", host, delay)
                 await asyncio.sleep(delay)
-                delay = min(60, delay * 2)
+            finally:
+                if self.ws_connections.get(device_id) is socket:
+                    self.ws_connections.pop(device_id, None)
 
     async def _handle_websocket_message(self, device_id, message):
         gateway = self.gateways.get(device_id)
@@ -615,7 +846,7 @@ class ShellyAdapter:
     async def _start_gateway_discovery(self, device_id, gateway):
         socket = self.ws_connections.get(device_id)
         if socket is not None:
-            frame = {"id": random.randint(1, 2_000_000_000), "src": RPC_SOURCE,
+            frame = {"id": random.randint(1, 2_000_000_000), "src": self.websocket_rpc_source,
                      "method": "BTHome.StartDeviceDiscovery", "params": {"duration": 30}}
             try:
                 await socket.send(json.dumps(frame, separators=(",", ":")))
@@ -823,6 +1054,8 @@ class ShellyAdapter:
         if not device:
             return
         node_id = self.context.stable_node_id(f"bthome:{mac}")
+        if str(node_id) in self.ignored_node_ids:
+            return
         now = time.time()
         values = self.blu_values.get(mac, {})
         attributes = []
@@ -883,7 +1116,12 @@ class ShellyAdapter:
 
     def _save_state(self):
         self.context.save_state({"blu_devices": self.learned_blu, "blu_values": self.blu_values,
-                                 "attribute_offsets": self.attribute_offsets})
+                                 "attribute_offsets": self.attribute_offsets,
+                                 "disabled_gateways": sorted(self.disabled_gateways),
+                                 "ignored_gateways": sorted(self.ignored_gateways),
+                                 "disabled_node_ids": sorted(self.disabled_node_ids),
+                                 "ignored_node_ids": sorted(self.ignored_node_ids),
+                                 "gateway_nodes": self.gateway_nodes})
 
 
 def _component_values(kind, status):

@@ -63,6 +63,7 @@ class FakeContext:
     def load_state(self, default=None): return self.state or default
     def save_state(self, value): self.state = value
     def stable_node_id(self, _external): return 1_730_000_007
+    def report_connection(self, *_args, **_values): pass
     @staticmethod
     def attribute_id(node_id, offset): return node_id * 100 + offset
     async def publish_node(self, node): self.saved.append(node)

@@ -1,0 +1,302 @@
+[
+  {
+    "id": "70c30d1818e46b02",
+    "type": "tab",
+    "label": "Shelly Script/WebSocket Test",
+    "disabled": false,
+    "info": "Testet die RPC-Abfolge am Shelly Pro 4PM 192.168.178.192. Der Script-Test liest den vorhandenen Code und schreibt exakt denselben Code zurück."
+  },
+  {
+    "id": "ba51a5ca59e37c92",
+    "type": "comment",
+    "z": "70c30d1818e46b02",
+    "name": "1. Erst nur den Lesetest auslösen und die anderen WebSockets beobachten",
+    "info": "Der Lesetest bildet die Initialisierungsabfragen des SHB nach. Zwischen den Aufrufen liegt jeweils eine Sekunde.",
+    "x": 390,
+    "y": 60,
+    "wires": []
+  },
+  {
+    "id": "89945ff4e9def298",
+    "type": "inject",
+    "z": "70c30d1818e46b02",
+    "name": "A – lesende SHB-Abfolge testen",
+    "props": [],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "x": 190,
+    "y": 120,
+    "wires": [
+      [
+        "ea27c6531fb5c559"
+      ]
+    ]
+  },
+  {
+    "id": "ea27c6531fb5c559",
+    "type": "function",
+    "z": "70c30d1818e46b02",
+    "name": "Lese-RPCs vorbereiten",
+    "func": "const host = \"192.168.178.192\";\nconst calls = [\n    [\"Shelly.GetStatus\", {}],\n    [\"Shelly.GetConfig\", {}],\n    [\"Shelly.GetComponents\", {offset: 0, include: [\"config\", \"status\"]}],\n    [\"Shelly.ListMethods\", {}],\n    [\"Script.List\", {}]\n];\n\nreturn [calls.map((call, index) => ({\n    url: `http://${host}/rpc`,\n    method: \"POST\",\n    headers: {\"content-type\": \"application/json\"},\n    payload: JSON.stringify({\n        id: 1000 + index,\n        src: \"nod34-shb-test\",\n        method: call[0],\n        params: call[1]\n    }),\n    rpcMethod: call[0],\n    testPhase: \"read-only\"\n}))];",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 460,
+    "y": 120,
+    "wires": [
+      [
+        "daf0efe7866a7a34"
+      ]
+    ]
+  },
+  {
+    "id": "daf0efe7866a7a34",
+    "type": "delay",
+    "z": "70c30d1818e46b02",
+    "name": "1 RPC pro Sekunde",
+    "pauseType": "rate",
+    "timeout": "1",
+    "timeoutUnits": "seconds",
+    "rate": "1",
+    "nbRateUnits": "1",
+    "rateUnits": "second",
+    "randomFirst": "1",
+    "randomLast": "5",
+    "randomUnits": "seconds",
+    "drop": false,
+    "allowrate": false,
+    "outputs": 1,
+    "x": 700,
+    "y": 120,
+    "wires": [
+      [
+        "aa8cc3a182c06d47"
+      ]
+    ]
+  },
+  {
+    "id": "aa8cc3a182c06d47",
+    "type": "http request",
+    "z": "70c30d1818e46b02",
+    "name": "Shelly HTTP-RPC",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 930,
+    "y": 120,
+    "wires": [
+      [
+        "df6bf3010db7612e"
+      ]
+    ]
+  },
+  {
+    "id": "df6bf3010db7612e",
+    "type": "debug",
+    "z": "70c30d1818e46b02",
+    "name": "Antworten Lesetest",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1170,
+    "y": 120,
+    "wires": []
+  },
+  {
+    "id": "986559c0c1dc4d0d",
+    "type": "comment",
+    "z": "70c30d1818e46b02",
+    "name": "2. Optional: vorhandenes SHB-BLE-Script einmal stoppen und wieder starten",
+    "info": "Achtung: Dieser Test unterbricht den BLU-Scanner für etwa zehn Sekunden. Er liest den vorhandenen Code, stoppt das Script und schreibt denselben Code mit Script.PutCode zurück.",
+    "x": 400,
+    "y": 220,
+    "wires": []
+  },
+  {
+    "id": "56bcfb241522efbf",
+    "type": "inject",
+    "z": "70c30d1818e46b02",
+    "name": "B – Script Stop/Start testen",
+    "props": [],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "x": 180,
+    "y": 280,
+    "wires": [
+      [
+        "c1082809fdc84d8f"
+      ]
+    ]
+  },
+  {
+    "id": "c1082809fdc84d8f",
+    "type": "function",
+    "z": "70c30d1818e46b02",
+    "name": "Script.List vorbereiten",
+    "func": "const host = \"192.168.178.192\";\nmsg.url = `http://${host}/rpc`;\nmsg.method = \"POST\";\nmsg.headers = {\"content-type\": \"application/json\"};\nmsg.payload = JSON.stringify({\n    id: 2000,\n    src: \"nod34-shb-test\",\n    method: \"Script.List\",\n    params: {}\n});\nmsg.shellyHost = host;\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 440,
+    "y": 280,
+    "wires": [
+      [
+        "367c8dfd216b3212"
+      ]
+    ]
+  },
+  {
+    "id": "367c8dfd216b3212",
+    "type": "http request",
+    "z": "70c30d1818e46b02",
+    "name": "Script-Liste lesen",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 690,
+    "y": 280,
+    "wires": [
+      [
+        "bd3264b15c2eb137"
+      ]
+    ]
+  },
+  {
+    "id": "bd3264b15c2eb137",
+    "type": "function",
+    "z": "70c30d1818e46b02",
+    "name": "SHB-Script finden + Code anfordern",
+    "func": "const body = msg.payload || {};\nconst result = body.result || body;\nconst scripts = Array.isArray(result.scripts) ? result.scripts : (Array.isArray(result) ? result : []);\nconst script = scripts.find(item => item && item.name === \"SmartHomeBoard BLE v1\");\n\nif (!script) {\n    node.error(\"Script 'SmartHomeBoard BLE v1' wurde auf diesem Shelly nicht gefunden\", msg);\n    return null;\n}\n\nconst host = msg.shellyHost || \"192.168.178.192\";\nconst scriptId = Number(script.id);\nreturn {\n    url: `http://${host}/rpc`,\n    method: \"POST\",\n    headers: {\"content-type\": \"application/json\"},\n    payload: JSON.stringify({\n        id: 2050,\n        src: \"nod34-shb-test\",\n        method: \"Script.GetCode\",\n        params: {id: scriptId}\n    }),\n    shellyHost: host,\n    scriptId,\n    rpcMethod: \"Script.GetCode\",\n    testPhase: \"read-script-code\"\n};",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 970,
+    "y": 280,
+    "wires": [
+      [
+        "0ba252646c475d20"
+      ]
+    ]
+  },
+  {
+    "id": "0ba252646c475d20",
+    "type": "http request",
+    "z": "70c30d1818e46b02",
+    "name": "Vorhandenen Script-Code lesen",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 1240,
+    "y": 280,
+    "wires": [
+      [
+        "53c9e9310e69de36"
+      ]
+    ]
+  },
+  {
+    "id": "53c9e9310e69de36",
+    "type": "function",
+    "z": "70c30d1818e46b02",
+    "name": "Stop → PutCode → Config → Status → Start",
+    "func": "const body = msg.payload || {};\nconst result = body.result || body;\nconst code = result.data;\nconst left = Number(result.left || 0);\n\nif (typeof code !== \"string\" || code.length === 0) {\n    node.error(\"Script.GetCode hat keinen Script-Code geliefert – Test abgebrochen\", msg);\n    return null;\n}\nif (left > 0) {\n    node.error(`Script.GetCode ist unvollständig (${left} Bytes fehlen) – Test abgebrochen`, msg);\n    return null;\n}\n\nconst host = msg.shellyHost || \"192.168.178.192\";\nconst scriptId = Number(msg.scriptId);\nconst calls = [\n    [0, \"Script.Stop\", {id: scriptId}],\n    [2500, \"Script.PutCode\", {id: scriptId, code, append: false}],\n    [5000, \"Script.SetConfig\", {id: scriptId, config: {enable: true}}],\n    [7500, \"Script.GetStatus\", {id: scriptId}],\n    [10000, \"Script.Start\", {id: scriptId}]\n];\n\ncalls.forEach(([delay, method, params], index) => {\n    setTimeout(() => node.send({\n        url: `http://${host}/rpc`,\n        method: \"POST\",\n        headers: {\"content-type\": \"application/json\"},\n        payload: JSON.stringify({\n            id: 2100 + index,\n            src: \"nod34-shb-test\",\n            method,\n            params\n        }),\n        rpcMethod: method,\n        scriptId,\n        testPhase: \"script-rewrite\"\n    }), delay);\n});\n\nnode.status({fill: \"yellow\", shape: \"dot\", text: `Script ${scriptId}: Stop/PutCode/Config/Status/Start`});\nsetTimeout(() => node.status({}), 13000);\nreturn null;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 1530,
+    "y": 280,
+    "wires": [
+      [
+        "2536ff624122622b"
+      ]
+    ]
+  },
+  {
+    "id": "2536ff624122622b",
+    "type": "http request",
+    "z": "70c30d1818e46b02",
+    "name": "Script HTTP-RPC",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 1840,
+    "y": 280,
+    "wires": [
+      [
+        "de28c1b505a88a3e"
+      ]
+    ]
+  },
+  {
+    "id": "de28c1b505a88a3e",
+    "type": "debug",
+    "z": "70c30d1818e46b02",
+    "name": "Antworten Script-Test",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 2070,
+    "y": 280,
+    "wires": []
+  }
+]

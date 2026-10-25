@@ -51,6 +51,12 @@ class ModuleContext:
         self.runtime.database.set_integration_state(self.integration_id, status, error)
         await self.runtime.broadcast({"type": "integration", "integration_id": self.integration_id, "status": status, "error": error})
 
+    def report_connection(self, connection_id, **values):
+        self.runtime.report_connection(self.integration_id, connection_id, **values)
+
+    def remove_connection(self, connection_id):
+        self.runtime.remove_connection(self.integration_id, connection_id)
+
     def stable_node_id(self, external_id):
         return self.runtime.stable_id(self.integration_id, external_id, 1_700_000_000, 1_799_000_000)
 

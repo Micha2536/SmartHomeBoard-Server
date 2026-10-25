@@ -19,6 +19,7 @@ class Runtime:
         self.sequence = int(database.setting("sequence", 0))
         self.automation_engine = None
         self.pending_commands = {}
+        self.connections = {}
 
     async def start(self):
         self.registry.load()
@@ -98,6 +99,7 @@ class Runtime:
                     await adapter.stop()
                 except Exception:
                     log.exception("Fehlgeschlagene Integration %s konnte nicht sauber geschlossen werden", instance["name"])
+            self.clear_connections(instance["id"])
             self.database.set_integration_state(instance["id"], "Fehler", str(error), 0)
             log.exception("Integration %s konnte nicht gestartet werden", instance["name"])
 
@@ -110,6 +112,55 @@ class Runtime:
                 log.exception("Integration %s konnte nicht sauber gestoppt werden", integration_id)
         if remove_nodes:
             self.database.remove_nodes(integration_id)
+        self.clear_connections(integration_id)
+
+    def report_connection(self, integration_id, connection_id, **values):
+        """Keep a lightweight, live snapshot of external persistent connections."""
+        key = f"{integration_id}:{connection_id}"
+        current = dict(self.connections.get(key, {}))
+        current.update(values)
+        current.update({
+            "id": str(connection_id),
+            "integration_id": str(integration_id),
+            "updated_at": time.time(),
+        })
+        if values.get("message_received"):
+            current["last_message_at"] = current["updated_at"]
+        current.pop("message_received", None)
+        self.connections[key] = current
+
+    def clear_connections(self, integration_id):
+        prefix = f"{integration_id}:"
+        for key in [item for item in self.connections if item.startswith(prefix)]:
+            self.connections.pop(key, None)
+
+    def remove_connection(self, integration_id, connection_id):
+        self.connections.pop(f"{integration_id}:{connection_id}", None)
+
+    def connection_status(self):
+        integrations = {str(item["id"]): item for item in self.database.integrations()}
+        combined = {}
+        for integration_id, adapter in self.adapters.items():
+            provider = getattr(adapter, "connection_status", None)
+            if not provider:
+                continue
+            try:
+                for item in provider() or []:
+                    connection_id = str(item.get("id", "default"))
+                    key = f"{integration_id}:{connection_id}"
+                    combined[key] = {**item, "integration_id": str(integration_id)}
+            except Exception:
+                log.exception("Verbindungsstatus von %s konnte nicht gelesen werden", integration_id)
+        for key, item in self.connections.items():
+            combined[key] = {**combined.get(key, {}), **item}
+        rows = []
+        for item in combined.values():
+            row = dict(item)
+            integration = integrations.get(str(row.get("integration_id", "")), {})
+            row.setdefault("integration_name", integration.get("name", row.get("integration_id", "")))
+            row.setdefault("module_id", integration.get("module_id", ""))
+            rows.append(row)
+        return sorted(rows, key=lambda row: (str(row.get("integration_name", "")).casefold(), str(row.get("peer", row.get("endpoint", ""))).casefold()))
 
     async def test_instance(self, instance):
         # Eine bereits laufende Integration darf für einen Verbindungstest nicht
@@ -189,6 +240,11 @@ class Runtime:
         node = self.database.node(int(node_id))
         if not node:
             raise KeyError("Servergerät wurde nicht gefunden")
+        integration_id = str(node.get("integration_id", ""))
+        adapter = self.adapters.get(integration_id)
+        handler = getattr(adapter, "set_device_enabled", None) if adapter else None
+        if handler:
+            await handler(int(node_id), bool(enabled))
         settings = self.database.setting("dashboard_device_enabled", {}) or {}
         settings[str(int(node_id))] = bool(enabled)
         self.database.set_setting("dashboard_device_enabled", settings)
@@ -198,6 +254,26 @@ class Runtime:
         self.database.set_setting("sequence", self.sequence)
         await self.broadcast_snapshot()
         return node
+
+    async def delete_device(self, node_id):
+        node = self.database.node(int(node_id))
+        if not node:
+            raise KeyError("Servergerät wurde nicht gefunden")
+        integration_id = str(node.get("integration_id", ""))
+        adapter = self.adapters.get(integration_id)
+        handler = getattr(adapter, "delete_device", None) if adapter else None
+        if not handler:
+            raise ValueError("Diese Integration unterstützt das dauerhafte Löschen einzelner Geräte nicht")
+        await handler(int(node_id))
+        self.database.remove_node(integration_id, int(node_id))
+        for setting_name in ("dashboard_device_enabled", "node_custom_names"):
+            values = self.database.setting(setting_name, {}) or {}
+            values.pop(str(int(node_id)), None)
+            self.database.set_setting(setting_name, values)
+        self.sequence += 1
+        self.database.set_setting("sequence", self.sequence)
+        await self.broadcast_snapshot()
+        return {"ok": True}
 
     async def set_value(self, node_id, attribute_id, value, source="server_api", source_detail="", client_id="", metadata=None):
         node = self.database.node(int(node_id))

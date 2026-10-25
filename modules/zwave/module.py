@@ -72,10 +72,23 @@ class ZWaveAdapter:
         self.value_offsets = dict(state.get("value_offsets", {})) if isinstance(state, dict) else {}
         self.next_offset = max([int(value) for value in self.value_offsets.values()] or [0]) + 1
 
+    def connection_status(self):
+        url = str(self.configuration.get("ws_url", "ws://127.0.0.1:3000")).strip()
+        connected = bool(self.client and getattr(self.client, "connected", False) and self.controller)
+        return [{
+            "id": "zwave-js", "protocol": "WebSocket", "direction": "Ausgehend",
+            "endpoint": url, "peer": "Z-Wave JS",
+            "state": "Verbunden" if connected else "Verbindung wird aufgebaut", "error": "",
+        }]
+
     async def start(self):
         url = str(self.configuration.get("ws_url", "ws://127.0.0.1:3000")).strip()
         if not url.startswith(("ws://", "wss://")):
             raise ValueError("Die Z-Wave-JS-Adresse muss mit ws:// oder wss:// beginnen")
+        self.context.report_connection(
+            "zwave-js", protocol="WebSocket", direction="Ausgehend", endpoint=url,
+            peer="Z-Wave JS", state="Verbindung wird aufgebaut", error="",
+        )
         self.first_connection = asyncio.get_running_loop().create_future()
         self.runner_task = asyncio.create_task(self._connection_loop(url))
         try:
@@ -100,6 +113,7 @@ class ZWaveAdapter:
         if self.runner_task:
             await asyncio.gather(self.runner_task, return_exceptions=True)
         self.client = self.controller = self.session = None
+        self.context.report_connection("zwave-js", state="Beendet")
 
     async def health_check(self):
         if not self.client or not self.client.connected or not self.controller:
@@ -171,9 +185,11 @@ class ZWaveAdapter:
                 if not self.stopping:
                     await self.context.set_status("Verbindung unterbrochen", "Z-Wave JS wurde getrennt; neuer Versuch läuft")
             except asyncio.CancelledError:
+                self.context.report_connection("zwave-js", state="Beendet")
                 return
             except Exception as error:
                 log.exception("Z-Wave-JS-Verbindung fehlgeschlagen")
+                self.context.report_connection("zwave-js", state="Getrennt", error=str(error))
                 if first_attempt and self.first_connection and not self.first_connection.done():
                     self.first_connection.set_exception(ConnectionError(f"Z-Wave JS konnte nicht verbunden werden: {error}"))
                     await self._close_connection()
@@ -206,6 +222,7 @@ class ZWaveAdapter:
             ready_task.cancel()
             await asyncio.gather(ready_task, return_exceptions=True)
         self.controller = self.client.driver.controller
+        self.context.report_connection("zwave-js", state="Verbunden", error="", message_received=True)
         self._wire_controller()
         await self._apply_inclusion_state(self.controller.inclusion_state)
         for node in self.controller.nodes.values():
@@ -287,6 +304,7 @@ class ZWaveAdapter:
         task.add_done_callback(self.event_tasks.discard)
 
     async def _publish_node(self, node):
+        self.context.report_connection("zwave-js", message_received=True)
         published_id = self.context.stable_node_id(f"node-{node.node_id}")
         self.node_by_published_id[published_id] = node
         attributes = []

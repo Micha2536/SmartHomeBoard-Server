@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import datetime as dt
+from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
 
@@ -11,6 +12,7 @@ class Database:
         self._connection = sqlite3.connect(Path(data_dir) / "smarthomeboard.sqlite3", check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._lock = RLock()
+        self._settings_transaction_depth = 0
         with self._connection:
             # API and setup portal run as two processes against the same file.
             # WAL plus a busy timeout keeps simultaneous app/web writes reliable.
@@ -148,8 +150,36 @@ class Database:
         return json.loads(row["value"]) if row else default
 
     def set_setting(self, key, value):
-        with self._lock, self._connection:
-            self._connection.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value)))
+        with self._lock:
+            if self._settings_transaction_depth:
+                self._connection.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value)))
+            else:
+                with self._connection:
+                    self._connection.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, json.dumps(value)))
+
+    @contextmanager
+    def settings_transaction(self):
+        """Atomically change several settings, including engine journal writes.
+
+        BEGIN IMMEDIATE excludes other SQLite writers before optimistic checks.
+        The caller must not yield to network/device I/O while holding this short
+        transaction. Existing standalone set_setting calls retain their commit.
+        """
+        with self._lock:
+            outermost = self._settings_transaction_depth == 0
+            if outermost:
+                self._connection.execute("BEGIN IMMEDIATE")
+            self._settings_transaction_depth += 1
+            try:
+                yield
+                if outermost:
+                    self._connection.commit()
+            except BaseException:
+                if outermost:
+                    self._connection.rollback()
+                raise
+            finally:
+                self._settings_transaction_depth -= 1
 
     def add_command_audit(self, item):
         created_at = item.get("created_at") or dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds")

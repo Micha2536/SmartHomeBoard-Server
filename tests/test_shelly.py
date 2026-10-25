@@ -22,6 +22,7 @@ class FakeContext:
         self.removed = []
         self.state = {}
         self.secrets = {}
+        self.connections = {}
 
     def load_state(self, default=None): return self.state or default
     def save_state(self, value): self.state = value
@@ -31,6 +32,8 @@ class FakeContext:
     async def publish_node(self, node): self.published.append(node)
     async def remove_node(self, node_id): self.removed.append(node_id)
     async def set_status(self, *_args): pass
+    def report_connection(self, connection_id, **values): self.connections.setdefault(connection_id, {}).update(values)
+    def remove_connection(self, connection_id): self.connections.pop(connection_id, None)
     def clear_configuration_value(self, _key): pass
 
 
@@ -53,6 +56,130 @@ class ShellyTests(unittest.IsolatedAsyncioTestCase):
         fields = {item["key"]: item for item in actions["start_blu_learning"]["fields"]}
         self.assertEqual("select", fields["template"]["type"])
         self.assertIn("motion", {item["value"] for item in fields["template"]["options"]})
+        scan = next(item for item in manifest["fields"] if item["key"] == "scan_seconds")
+        self.assertEqual(300, scan["default"])
+
+    async def test_only_one_websocket_task_is_started_per_shelly(self):
+        adapter = MODULE.ShellyAdapter({}, FakeContext())
+        blocker = __import__("asyncio").Event()
+
+        async def websocket_loop(_device_id, _host, _generation):
+            await blocker.wait()
+
+        adapter._websocket_loop = websocket_loop
+        self.assertTrue(adapter._start_gateway_websocket("shellypro4pm", "192.168.1.40"))
+        first_task = adapter.ws_tasks["shellypro4pm"]
+        self.assertFalse(adapter._start_gateway_websocket("shellypro4pm", "192.168.1.40"))
+        self.assertIs(first_task, adapter.ws_tasks["shellypro4pm"])
+        self.assertEqual(1, adapter.ws_generations["shellypro4pm"])
+
+        await adapter._stop_gateway_websocket("shellypro4pm", "Test beendet")
+        self.assertEqual(2, adapter.ws_generations["shellypro4pm"])
+
+    def test_shelly_websocket_has_no_automatic_ping_and_reconnect_waits_at_least_15_seconds(self):
+        source = __import__("inspect").getsource(MODULE.ShellyAdapter._websocket_loop)
+        self.assertIn("ping_interval=None", source)
+        self.assertIn("self.websocket_rpc_source", source)
+        self.assertGreaterEqual(MODULE.WS_INITIAL_DELAY_SECONDS, 20)
+        self.assertGreaterEqual(MODULE.WS_RECONNECT_MIN_SECONDS, 15)
+
+    def test_each_server_run_uses_a_distinct_websocket_rpc_source(self):
+        first = MODULE.ShellyAdapter({}, FakeContext())
+        second = MODULE.ShellyAdapter({}, FakeContext())
+        self.assertTrue(first.websocket_rpc_source.startswith("shb-"))
+        self.assertNotEqual(first.websocket_rpc_source, second.websocket_rpc_source)
+
+    async def test_disabling_physical_shelly_stops_socket_and_persists_state(self):
+        context = FakeContext()
+        adapter = MODULE.ShellyAdapter({}, context)
+        device_id = "shellyplus1-aabbcc"
+        gateway = {
+            "host": "192.168.1.40", "info": {"id": device_id, "mac": "AA:BB:CC:11:22:33", "gen": 2},
+            "config": {"sys": {"device": {"name": "Heizraum"}}}, "ws_connected": True,
+        }
+        adapter.gateways[device_id] = gateway
+        adapter.ws_tasks[device_id] = __import__("asyncio").create_task(__import__("asyncio").sleep(60))
+        node_id = context.stable_node_id("shelly:aa:bb:cc:11:22:33")
+
+        await adapter.set_device_enabled(node_id, False)
+
+        self.assertIn(device_id, adapter.disabled_gateways)
+        self.assertNotIn(device_id, adapter.ws_tasks)
+        self.assertFalse(gateway["ws_connected"])
+        self.assertEqual("Deaktiviert", context.connections[f"shelly:{device_id}"]["state"])
+        self.assertIn(device_id, context.state["disabled_gateways"])
+
+    async def test_deleting_physical_shelly_ignores_future_discovery(self):
+        context = FakeContext()
+        adapter = MODULE.ShellyAdapter({}, context)
+        device_id = "shellyplus1-aabbcc"
+        gateway = {
+            "host": "192.168.1.40", "info": {"id": device_id, "mac": "AA:BB:CC:11:22:33", "gen": 2},
+            "config": {"sys": {"device": {"name": "Heizraum"}}}, "ws_connected": False,
+        }
+        adapter.gateways[device_id] = gateway
+        adapter.host_to_device[gateway["host"]] = device_id
+        node_id = context.stable_node_id("shelly:aa:bb:cc:11:22:33")
+
+        await adapter.delete_device(node_id)
+
+        self.assertIn(device_id, adapter.ignored_gateways)
+        self.assertNotIn(device_id, adapter.gateways)
+        self.assertNotIn(gateway["host"], adapter.host_to_device)
+        self.assertIn(device_id, context.state["ignored_gateways"])
+
+    async def test_deleting_stored_but_not_discovered_shelly_does_not_fail(self):
+        context = FakeContext()
+        adapter = MODULE.ShellyAdapter({}, context)
+        stale_node_id = 1_740_123_456
+
+        await adapter.delete_device(stale_node_id)
+
+        self.assertIn(str(stale_node_id), adapter.ignored_node_ids)
+        self.assertIn(str(stale_node_id), context.state["ignored_node_ids"])
+
+    async def test_periodic_discovery_does_not_reload_known_gateway(self):
+        context = FakeContext()
+        adapter = MODULE.ShellyAdapter({}, context)
+        device_id = "shellyplus1-aabbcc"
+        info = {"id": device_id, "mac": "AA:BB:CC:11:22:33", "gen": 2}
+        adapter.gateways[device_id] = {
+            "host": "192.168.1.40", "info": info, "config": {"sys": {}}, "ws_connected": False,
+        }
+        adapter.disabled_gateways.add(device_id)
+
+        async def device_info(_host): return info
+        async def unexpected_reload(*_args): raise AssertionError("bekannter Shelly wurde unnötig vollständig neu geladen")
+        adapter._device_info = device_info
+        adapter._load_gateway = unexpected_reload
+
+        result = await adapter._ensure_gateway("192.168.1.40")
+        self.assertEqual(device_id, result)
+
+    async def test_connected_gateway_receives_no_periodic_http_or_rpc_request(self):
+        import asyncio
+        context = FakeContext()
+        adapter = MODULE.ShellyAdapter({}, context)
+        device_id = "shellyplus1-aabbcc"
+        host = "192.168.1.40"
+        adapter.gateways[device_id] = {
+            "host": host, "info": {"id": device_id, "mac": "AA:BB:CC:11:22:33", "gen": 2},
+            "config": {"sys": {}}, "ws_connected": True,
+        }
+        adapter.host_to_device[host] = device_id
+        task = asyncio.create_task(asyncio.sleep(60))
+        adapter.ws_tasks[device_id] = task
+
+        async def unexpected_request(*_args, **_kwargs):
+            raise AssertionError("verbundener Shelly erhielt einen unnötigen Hintergrundabruf")
+        adapter._device_info = unexpected_request
+        adapter._load_gateway = unexpected_request
+        try:
+            result = await adapter._ensure_gateway(host)
+            self.assertEqual(device_id, result)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def test_addon_components_stay_under_the_physical_shelly(self):
         context = FakeContext()

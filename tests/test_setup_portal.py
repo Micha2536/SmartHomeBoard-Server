@@ -4,6 +4,16 @@ from server.setup_portal import _pretty_protocol_message, automations_page, comm
 
 
 class SetupPortalTests(unittest.TestCase):
+    def test_homee_paths_are_editable_and_not_dropped_on_submit(self):
+        html = automations_page("0.20.17", {"automations": []})
+        self.assertIn('id="prerequisites"', html)
+        self.assertIn('id="alwaysActions"', html)
+        self.assertIn("querySelectorAll('#prerequisites .automation-row')", html)
+        self.assertIn("querySelectorAll('#alwaysActions .automation-row')", html)
+        self.assertIn("(initialRule.prerequisites||[])", html)
+        self.assertIn("(initialRule.alwaysActions||[])", html)
+        self.assertNotIn("!rule.triggers.length", html)
+
     def test_command_audit_page_shows_timestamp_source_and_value_path(self):
         html = command_audit_page("0.20.0", [{
             "id": 1, "created_at": "2026-08-21T18:30:01.123+00:00",
@@ -109,6 +119,37 @@ class SetupPortalTests(unittest.TestCase):
         self.assertIn("Anmeldecode senden", html)
         self.assertIn('class="danger"', html)
 
+    def test_home_connect_pairing_result_has_singlekey_link_and_code(self):
+        manifests = [{"id": "home_connect", "name": "Home Connect", "description": "Test", "fields": []}]
+        integrations = [{
+            "id": "hc-1", "module_id": "home_connect", "name": "Home Connect",
+            "enabled": True, "configuration": {}, "device_count": 0,
+            "status": "Kopplung läuft", "error": None,
+        }]
+        html = integrations_page(
+            "0.20.12", manifests, integrations, selected_id="hc-1",
+            action_result={
+                "verification_url": "https://api.home-connect.com/security/oauth/device_verify?user_code=ABCD",
+                "user_code": "ABCD",
+            },
+        )
+        self.assertIn("SingleKey-ID-Kopplung", html)
+        self.assertIn("Home Connect öffnen und anmelden", html)
+        self.assertIn("user_code=ABCD", html)
+
+    def test_integration_page_shows_live_websocket_connections_without_reload(self):
+        html = integrations_page(
+            "0.20.4", [], [], connections=[{
+                "integration_name": "Shelly", "peer": "Pro 4PM", "protocol": "WebSocket",
+                "direction": "Ausgehend", "endpoint": "ws://192.0.2.4/rpc",
+                "state": "Verbunden", "last_message_at": 123.0,
+            }],
+        )
+        self.assertIn("Live-Verbindungen", html)
+        self.assertIn("ws://192.0.2.4/rpc", html)
+        self.assertIn("/setup/integrations/connections", html)
+        self.assertIn("setInterval(refresh,5000)", html)
+
     def test_integration_editor_lists_devices_and_visibility_controls(self):
         manifests = [{"id": "shelly", "name": "Shelly", "description": "Test", "fields": []}]
         integrations = [{
@@ -129,6 +170,8 @@ class SetupPortalTests(unittest.TestCase):
         self.assertIn("BLU Fenster", html)
         self.assertNotIn("Fremdgerät", html)
         self.assertIn('action="/setup/integrations/device-visibility"', html)
+        self.assertIn('action="/setup/integrations/device-delete"', html)
+        self.assertIn("WebSocket-Verbindung", html)
         self.assertIn("Nicht aktiv", html)
 
     def test_module_action_can_request_a_temporary_payload_field(self):

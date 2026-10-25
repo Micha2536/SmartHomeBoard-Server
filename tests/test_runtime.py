@@ -53,6 +53,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(changed["current_value"], 23.5)
         self.assertEqual(changed["last_value"], 20)
 
+    async def test_connection_monitor_tracks_messages_and_removes_stopped_integrations(self):
+        self.runtime.report_connection(
+            "demo-1", "socket-1", protocol="WebSocket", endpoint="ws://device/rpc",
+            peer="Testgerät", state="Verbunden", message_received=True,
+        )
+        rows = self.runtime.connection_status()
+        self.assertEqual(1, len(rows))
+        self.assertEqual("Server-Demo", rows[0]["integration_name"])
+        self.assertEqual("demo", rows[0]["module_id"])
+        self.assertGreater(rows[0]["last_message_at"], 0)
+
+        await self.runtime.stop_instance("demo-1", remove_nodes=False)
+        self.assertEqual([], self.runtime.connection_status())
+
+    async def test_connection_monitor_reads_active_adapter_immediately(self):
+        self.runtime.adapters["demo-1"].connection_status = lambda: [{
+            "id": "device-socket", "protocol": "WebSocket", "endpoint": "ws://device/rpc",
+            "peer": "Gerät", "state": "Verbindung wird aufgebaut",
+        }]
+        rows = self.runtime.connection_status()
+        self.assertEqual(1, len(rows))
+        self.assertEqual("device-socket", rows[0]["id"])
+        self.assertEqual("Server-Demo", rows[0]["integration_name"])
+
     async def test_switch_command_audit_records_source_and_confirmation(self):
         node = self.database.nodes()[0]
         target = next(item for item in node["attributes"] if item["editable"])
@@ -140,6 +164,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await self.runtime.set_device_dashboard_enabled(node["id"], True)
         self.assertEqual([node["id"]], [item["id"] for item in self.runtime.visible_nodes()])
+
+    async def test_device_visibility_notifies_owning_adapter(self):
+        node = self.database.nodes()[0]
+        calls = []
+
+        async def set_device_enabled(node_id, enabled):
+            calls.append((node_id, enabled))
+
+        self.runtime.adapters["demo-1"].set_device_enabled = set_device_enabled
+        await self.runtime.set_device_dashboard_enabled(node["id"], False)
+        self.assertEqual([(node["id"], False)], calls)
+
+    async def test_device_delete_calls_adapter_and_removes_persisted_node(self):
+        node = self.database.nodes()[0]
+        calls = []
+
+        async def delete_device(node_id):
+            calls.append(node_id)
+
+        self.runtime.adapters["demo-1"].delete_device = delete_device
+        result = await self.runtime.delete_device(node["id"])
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual([node["id"]], calls)
+        self.assertIsNone(self.database.node(node["id"]))
 
     async def test_attribute_history_is_dispatched_to_device_integration(self):
         node = self.database.nodes()[0]
@@ -277,8 +325,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         event = {"node_id": 1, "attribute_id": 2, "previous": 0, "value": 1}
         changed = {"kind": "attributeChanged", "nodeID": 1, "attributeID": 2}
         self.assertTrue(engine._event_trigger(changed, event))
+        self.assertTrue(engine._event_trigger(changed, {**event, "node_id": "1", "attribute_id": "2"}))
         event["previous"] = 1
         self.assertFalse(engine._event_trigger(changed, event))
+        self.assertEqual(1.0, engine._automation_value({"current_value": "1"}))
+        self.assertEqual(2.0, engine._automation_value({"current_value": None, "target_value": "2"}))
 
     async def test_automation_toggle_accepts_only_editable_binary_attributes(self):
         engine = AutomationEngine(self.runtime)
@@ -286,6 +337,23 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(engine._is_toggleable({"type": 999, "editable": True, "minimum": 0, "maximum": 1}))
         self.assertFalse(engine._is_toggleable({"type": 1, "editable": False}))
         self.assertFalse(engine._is_toggleable({"type": 6, "editable": True, "minimum": 5, "maximum": 35}))
+
+    async def test_attribute_changed_trigger_accepts_string_ids_and_numeric_values(self):
+        engine = AutomationEngine(self.runtime)
+        rule = {
+            "id": "changed", "name": "Änderung", "isEnabled": True, "cooldownSeconds": 0,
+            "triggers": [{"kind": "attributeChanged", "nodeID": 42, "attributeID": 4201}],
+            "conditions": [],
+            "actions": [{"id": "notify", "kind": "showPopup", "delaySeconds": 60}],
+        }
+        engine.replace([rule])
+        previous = {"id": 42, "attributes": [{"id": "4201", "current_value": "0"}]}
+        current = {"id": "42", "name": "Kontakt", "attributes": [{"id": "4201", "current_value": "1"}]}
+
+        await engine.node_changed(previous, current)
+
+        self.assertIn("changed:notify", engine.action_tasks)
+        engine._cancel_rule_tasks("changed")
 
     async def test_app_integration_action_is_forwarded_to_connected_app(self):
         engine = AutomationEngine(self.runtime)
@@ -400,6 +468,110 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("branch:else", engine.action_tasks)
         self.assertNotIn("branch:then", engine.action_tasks)
         engine._cancel_rule_tasks("branch")
+
+    async def test_homee_paths_prerequisite_and_always_matrix(self):
+        engine = AutomationEngine(self.runtime)
+        node = self.database.nodes()[0]
+        attribute = node["attributes"][0]
+        condition = lambda matches: {"kind": "attribute", "nodeID": node["id"], "attributeID": attribute["id"],
+                                     "comparison": "equal", "value": attribute["current_value"] if matches else 999}
+        for prerequisite in (False, True):
+            for truth in (False, True):
+                rule = {"prerequisites": [condition(prerequisite)], "conditions": [condition(truth)],
+                        "alwaysActions": [{"id": "always"}], "actions": [{"id": "then"}],
+                        "directElseActions": [{"id": "else"}]}
+                branch, actions = engine._selected_branch(rule)
+                self.assertEqual(["always", "then" if truth else "else"] if prerequisite else [], [a["id"] for a in actions])
+                if not prerequisite:
+                    self.assertEqual("BLOCKIERT", branch)
+        self.assertEqual(1, engine.status()["homee_path_version"])
+
+    async def test_homee_always_survives_if_change_but_not_prerequisite_change(self):
+        for block_prerequisite in (False, True):
+            engine = AutomationEngine(self.runtime)
+            node = self.database.nodes()[0]
+            attribute = node["attributes"][0]
+            condition = {"kind": "attribute", "nodeID": node["id"], "attributeID": attribute["id"],
+                         "comparison": "equal", "value": attribute["current_value"]}
+            action = lambda name, value: {"id": name, "kind": "setAttribute", "nodeID": node["id"], "attributeID": attribute["id"], "value": value}
+            rule = {"id": "path-test", "conditionValidation": "both", "cooldownSeconds": 0,
+                    "prerequisites": [dict(condition)], "conditions": [dict(condition)],
+                    "alwaysActions": [action("always", 101)], "actions": [action("then", 102)],
+                    "directElseActions": [action("else", 103)]}
+            sent = []
+            async def capture(node_id, attribute_id, value, **kwargs): sent.append(value)
+            self.runtime.set_value = capture
+            ok, _ = await engine._trigger(rule, {})
+            self.assertTrue(ok)
+            rule["prerequisites" if block_prerequisite else "conditions"][0]["value"] = 999
+            await asyncio.gather(*list(engine.action_tasks.values()))
+            self.assertEqual([] if block_prerequisite else [101], sent)
+
+    async def test_homee_execution_time_selects_paths_after_trigger(self):
+        engine = AutomationEngine(self.runtime)
+        node = self.database.nodes()[0]
+        attribute = node["attributes"][0]
+        condition = {"kind": "attribute", "nodeID": node["id"], "attributeID": attribute["id"], "comparison": "equal", "value": 999}
+        action = lambda name, value: {"id": name, "kind": "setAttribute", "nodeID": node["id"], "attributeID": attribute["id"], "value": value}
+        rule = {"id": "late-path", "conditionValidation": "executionTime", "cooldownSeconds": 0,
+                "prerequisites": [dict(condition)], "conditions": [dict(condition)],
+                "alwaysActions": [action("always", 101)], "actions": [action("then", 102)], "directElseActions": [action("else", 103)]}
+        sent = []
+        async def capture(node_id, attribute_id, value, **kwargs): sent.append(value)
+        self.runtime.set_value = capture
+        ok, _ = await engine._trigger(rule, {})
+        self.assertTrue(ok)
+        rule["prerequisites"][0]["value"] = attribute["current_value"]
+        await asyncio.gather(*list(engine.action_tasks.values()))
+        self.assertEqual([101, 103], sent)
+
+    async def test_nested_else_condition_selects_else_if_or_final_else(self):
+        engine = AutomationEngine(self.runtime)
+        node = self.database.nodes()[0]
+        attribute = node["attributes"][0]
+        condition = lambda value: {
+            "kind": "attribute", "nodeID": node["id"], "attributeID": attribute["id"],
+            "comparison": "equal", "value": value,
+        }
+        rule = {
+            "conditions": [condition(999)],
+            "elseConditions": [condition(attribute["current_value"])],
+            "actions": [{"id": "then"}],
+            "elseActions": [{"id": "else-if"}],
+            "elseElseActions": [{"id": "final-else"}],
+        }
+        branch, actions = engine._selected_branch(rule)
+        self.assertEqual("SONST-WENN", branch)
+        self.assertEqual("else-if", actions[0]["id"])
+
+        rule["elseConditions"] = [condition(998)]
+        branch, actions = engine._selected_branch(rule)
+        self.assertEqual("SONST", branch)
+        self.assertEqual("final-else", actions[0]["id"])
+
+    async def test_direct_untrue_action_runs_alongside_nested_branch(self):
+        engine = AutomationEngine(self.runtime)
+        node = self.database.nodes()[0]
+        attribute = node["attributes"][0]
+        condition = lambda value: {
+            "kind": "attribute", "nodeID": node["id"], "attributeID": attribute["id"],
+            "comparison": "equal", "value": value,
+        }
+        rule = {
+            "conditions": [condition(999)],
+            "elseConditions": [condition(attribute["current_value"])],
+            "directElseActions": [{"id": "direct"}],
+            "elseActions": [{"id": "nested-true"}],
+            "elseElseActions": [{"id": "nested-false"}],
+        }
+        branch, actions = engine._selected_branch(rule)
+        self.assertEqual("SONST-WENN", branch)
+        self.assertEqual(["direct", "nested-true"], [action["id"] for action in actions])
+
+        rule["elseConditions"] = [condition(998)]
+        branch, actions = engine._selected_branch(rule)
+        self.assertEqual("SONST", branch)
+        self.assertEqual(["direct", "nested-false"], [action["id"] for action in actions])
 
     async def test_push_action_passes_selected_recipients_and_device_value(self):
         engine = AutomationEngine(self.runtime)

@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
@@ -35,6 +35,8 @@ from .homee_enums import ATTRIBUTE_TYPES, NODE_PROFILES
 from .modules import ModuleRegistry
 from .runtime import Runtime
 from .push import PushService
+from .mcp_access import MCPAccess
+from .homeegrams import HomeegramAccess
 from .setup_portal import (
     automations_page as portal_automations,
     command_audit_page as portal_command_audit,
@@ -44,7 +46,7 @@ from .setup_portal import (
 )
 
 logging.basicConfig(level=os.getenv("SHB_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-VERSION = "0.20.2"
+VERSION = "0.20.26"
 SETUP_SESSION_COOKIE = "shb_setup_session"
 ENV_API_TOKEN = os.getenv("SHB_API_TOKEN", "").strip()
 database = Database(os.getenv("SHB_DATA_DIR", "/data"))
@@ -58,6 +60,7 @@ runtime.automation_engine = automation_engine
 
 def portal_integrations(*args, **kwargs):
     kwargs.setdefault("nodes", database.nodes())
+    kwargs.setdefault("connections", runtime.connection_status())
     return _portal_integrations(*args, **kwargs)
 
 
@@ -78,6 +81,10 @@ class AttributeCommand(BaseModel):
 
 class NodeNamePayload(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+
+
+class DeviceEnabledPayload(BaseModel):
+    enabled: bool
 
 
 class AutomationPayload(BaseModel):
@@ -185,6 +192,8 @@ def authorize(connection: HTTPConnection, authorization: Optional[str] = Header(
         return
     if connection.url.path == "/api/v1/displays/register" or connection.url.path.startswith("/api/v1/displays/device/"):
         return
+    if connection.url.path.startswith("/api/v1/sonos/tts/"):
+        return
     token = effective_api_token()
     if token and (not authorization or not compare_digest(authorization, f"Bearer {token}")):
         raise HTTPException(status_code=401, detail="API-Schlüssel ist ungültig")
@@ -208,7 +217,8 @@ async def lifespan(_app):
             )
     await runtime.start()
     await automation_engine.start()
-    yield
+    async with mcp_access.server.session_manager.run():
+        yield
     await automation_engine.stop()
     await runtime.shutdown()
     if discovery_transport:
@@ -222,6 +232,11 @@ async def setup_lifespan(_app):
 
 
 app = FastAPI(title="SmartHomeBoard Server", version=VERSION, lifespan=lifespan, dependencies=[Depends(authorize)])
+homeegram_access = HomeegramAccess(database, runtime)
+app.include_router(homeegram_access.router)
+mcp_access = MCPAccess(database, runtime, effective_api_token)
+app.include_router(mcp_access.router)
+app.mount("/mcp", mcp_access.http_app)
 setup_app = FastAPI(title="SmartHomeBoard Einrichtung", version=VERSION, lifespan=setup_lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
@@ -240,12 +255,17 @@ async def setup_integrations_page(request: Request):
     selected_id = request.query_params.get("edit", "")
     protocol_filter = request.query_params.get("protocol_filter", "").strip().lower()
     homee_protocol = {}
+    connections = []
     selected = database.integration(selected_id) if selected_id else None
     if selected and selected.get("module_id") == "homee" and selected.get("enabled"):
         try:
             homee_protocol = await load_homee_protocol(selected_id, protocol_filter)
         except (ValueError, httpx.HTTPError):
             homee_protocol = {}
+    try:
+        connections = await load_connection_status()
+    except (ValueError, httpx.HTTPError) as error:
+        connections = [_connection_api_error(error)]
     return portal_integrations(
         VERSION, registry.manifests(), database.integrations(),
         selected_module=request.query_params.get("module", ""),
@@ -254,7 +274,16 @@ async def setup_integrations_page(request: Request):
         token_required=bool(effective_api_token()),
         homee_protocol=homee_protocol,
         protocol_filter=protocol_filter,
+        connections=connections,
     )
+
+
+@setup_app.get("/setup/integrations/connections", response_class=JSONResponse, include_in_schema=False)
+async def setup_connection_status():
+    try:
+        return {"connections": await load_connection_status()}
+    except (ValueError, httpx.HTTPError) as error:
+        return {"connections": [_connection_api_error(error)]}
 
 
 @setup_app.post("/setup/integrations/save", response_class=HTMLResponse, include_in_schema=False)
@@ -313,8 +342,8 @@ async def set_setup_device_visibility(request: Request):
         node = database.node(node_id)
         if not node or str(node.get("integration_id", "")) != integration_id:
             raise KeyError("Das Gerät gehört nicht zu dieser Integration")
-        await runtime.set_device_dashboard_enabled(node_id, enabled)
-    except (KeyError, TypeError, ValueError) as action_error:
+        await call_local_api(f"api/v1/nodes/{node_id}/enabled", {"enabled": enabled}, method="PUT")
+    except (KeyError, TypeError, ValueError, httpx.HTTPError) as action_error:
         return setup_response(
             portal_integrations(
                 VERSION, registry.manifests(), database.integrations(), selected_id=integration_id,
@@ -322,6 +351,32 @@ async def set_setup_device_visibility(request: Request):
             ),
             status_code=400,
             authenticate=True,
+        )
+    return RedirectResponse(f"/setup/integrations?edit={integration_id}", status_code=303)
+
+
+@setup_app.post("/setup/integrations/device-delete", response_class=HTMLResponse, include_in_schema=False)
+async def delete_setup_device(request: Request):
+    values = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+    integration_id = _form_value(values, "integration_id")
+    authenticated = setup_credentials_valid(request, _form_value(values, "current_token"))
+    if effective_api_token() and not authenticated:
+        return setup_response(
+            portal_integrations(VERSION, registry.manifests(), database.integrations(), selected_id=integration_id,
+                                error="Der API-Schlüssel ist nicht korrekt.", token_required=True),
+            status_code=403,
+        )
+    try:
+        node_id = int(_form_value(values, "node_id"))
+        node = database.node(node_id)
+        if not node or str(node.get("integration_id", "")) != integration_id:
+            raise KeyError("Das Gerät gehört nicht zu dieser Integration")
+        await call_local_api(f"api/v1/nodes/{node_id}", method="DELETE")
+    except (KeyError, TypeError, ValueError, httpx.HTTPError) as action_error:
+        return setup_response(
+            portal_integrations(VERSION, registry.manifests(), database.integrations(), selected_id=integration_id,
+                                error=str(action_error), authenticated=True, token_required=bool(effective_api_token())),
+            status_code=400, authenticate=True,
         )
     return RedirectResponse(f"/setup/integrations?edit={integration_id}", status_code=303)
 
@@ -355,7 +410,7 @@ async def perform_setup_integration_action(request: Request):
             ),
             status_code=403,
         )
-    message, error, status_code = "", "", 200
+    message, error, status_code, action_result = "", "", 200, None
     try:
         payload = {
             key.removeprefix("payload__"): entries[-1]
@@ -364,6 +419,7 @@ async def perform_setup_integration_action(request: Request):
         }
         response = await call_local_api(f"api/v1/integrations/{integration_id}/actions/{action_id}", {"payload": payload})
         result = response.get("result", {}) if isinstance(response, dict) else {}
+        action_result = result
         message = str(result.get("message") or "Die Modulaktion wurde ausgeführt.")
     except (ValueError, httpx.HTTPError) as action_error:
         error, status_code = str(action_error), 502
@@ -371,6 +427,7 @@ async def perform_setup_integration_action(request: Request):
         portal_integrations(
             VERSION, registry.manifests(), database.integrations(), selected_id=integration_id,
             message=message, error=error, authenticated=True, token_required=bool(effective_api_token()),
+            action_result=action_result,
         ),
         status_code=status_code, authenticate=True,
     )
@@ -781,180 +838,9 @@ def _integration_configuration(values, manifest, previous):
 
 
 def validate_web_automation(source, nodes):
-    """Validate and normalize the no-code automation editor payload."""
-    if not isinstance(source, dict):
-        raise ValueError("Die Automation ist kein gültiges JSON-Objekt")
-    rule_id = str(source.get("id") or uuid.uuid4()).strip()
-    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,80}", rule_id):
-        raise ValueError("Die Automations-ID ist ungültig")
-    name = str(source.get("name", "")).strip()
-    if not name:
-        raise ValueError("Der Name der Automation fehlt")
-    node_map = {int(node.get("id", 0)): node for node in nodes}
-    triggers = [
-        _validate_web_condition(item, node_map, trigger=True)
-        for item in source.get("triggers", [])
-    ]
-    conditions = [
-        _validate_web_condition(item, node_map, trigger=False)
-        for item in source.get("conditions", [])
-    ]
-    actions = [_validate_web_action(item, node_map) for item in source.get("actions", [])]
-    else_actions = [_validate_web_action(item, node_map) for item in source.get("elseActions", [])]
-    if not triggers:
-        raise ValueError("Mindestens ein Auslöser ist erforderlich")
-    if not actions:
-        raise ValueError("Mindestens eine Aktion ist erforderlich")
-    validation = str(source.get("conditionValidation", "triggerTime"))
-    if validation not in ("triggerTime", "executionTime", "both"):
-        validation = "triggerTime"
-    return {
-        "id": rule_id,
-        "name": name[:120],
-        "isEnabled": bool(source.get("isEnabled", True)),
-        "triggers": triggers,
-        "conditions": conditions,
-        "actions": actions,
-        "elseActions": else_actions,
-        "cooldownSeconds": max(0, min(86400, _finite_number(source.get("cooldownSeconds", 30), "Mindestpause"))),
-        "conditionValidation": validation,
-    }
-
-
-def _validate_web_condition(source, nodes, trigger):
-    if not isinstance(source, dict):
-        raise ValueError("Auslöser oder Bedingung ist ungültig")
-    allowed = ("attribute", "attributeChanged", "attributeChangedBy", "groupAttribute", "timeDaily", "timeOnce") if trigger else ("attribute", "groupAttribute", "timeAfter", "timeBefore")
-    kind = str(source.get("kind", "attribute"))
-    if kind not in allowed:
-        raise ValueError(f"{kind} wird vom Server nicht als {'Auslöser' if trigger else 'Bedingung'} unterstützt")
-    result = {"id": str(source.get("id") or uuid.uuid4()), "kind": kind}
-    result["holdSeconds"] = max(0, min(86400, _finite_number(source.get("holdSeconds", 0), "Mindestdauer")))
-    if kind.startswith("time"):
-        result["minuteOfDay"] = max(0, min(1439, int(_finite_number(source.get("minuteOfDay", 0), "Uhrzeit"))))
-        if kind == "timeOnce":
-            scheduled = str(source.get("scheduledAt", "")).strip()
-            try:
-                dt.datetime.fromisoformat(scheduled.replace("Z", "+00:00"))
-            except ValueError as error:
-                raise ValueError("Der einmalige Zeitpunkt ist ungültig") from error
-            result.update({"scheduledAt": scheduled, "isConsumed": bool(source.get("isConsumed", False))})
-        return result
-    if kind == "attributeChanged":
-        node_id, attribute_id, _attribute = _automation_attribute(source, nodes)
-        result.update({"nodeID": node_id, "attributeID": attribute_id})
-        return result
-    comparison = str(source.get("comparison", "equal"))
-    if comparison not in ("equal", "notEqual", "greater", "less"):
-        raise ValueError("Der Vergleich ist ungültig")
-    if kind == "groupAttribute":
-        group_id = str(source.get("groupID", "")).strip()
-        groups = database.setting("device_groups", []) or []
-        if not any(str(item.get("id")) == group_id for item in groups):
-            raise ValueError("Die gewählte Gerätegruppe ist nicht mehr verfügbar")
-        aggregation = str(source.get("aggregation", "any"))
-        if aggregation not in ("any", "none", "all", "atLeast", "atMost", "exactly"):
-            raise ValueError("Die Gruppenauswertung ist ungültig")
-        result.update({
-            "groupID": group_id,
-            "attributeType": int(_finite_number(source.get("attributeType", 0), "Attributtyp")),
-            "attributeName": str(source.get("attributeName", ""))[:120],
-            "aggregation": aggregation,
-            "count": max(0, int(_finite_number(source.get("count", 1), "Geräteanzahl"))),
-            "comparison": comparison,
-            "value": _finite_number(source.get("value", 0), "Vergleichswert"),
-        })
-        return result
-    node_id, attribute_id, _attribute = _automation_attribute(source, nodes)
-    result.update({"nodeID": node_id, "attributeID": attribute_id, "comparison": comparison,
-                   "value": _finite_number(source.get("value", 0), "Vergleichswert")})
-    if kind == "attributeChangedBy":
-        unit = str(source.get("changeUnit", "absolute"))
-        result["changeUnit"] = unit if unit in ("absolute", "percent") else "absolute"
-    return result
-
-
-def _validate_web_action(source, nodes):
-    if not isinstance(source, dict):
-        raise ValueError("Eine Aktion ist ungültig")
-    kind = str(source.get("kind", "setAttribute"))
-    result = {
-        "id": str(source.get("id") or uuid.uuid4()), "kind": kind,
-        "delaySeconds": max(0, min(86400, _finite_number(source.get("delaySeconds", 0), "Verzögerung"))),
-    }
-    if kind in ("setAttribute", "toggleAttribute"):
-        node_id, attribute_id, attribute = _automation_attribute(source, nodes)
-        if not attribute.get("editable", False):
-            raise ValueError(f"{attribute.get('name', 'Attribut')} ist nicht steuerbar")
-        result.update({"nodeID": node_id, "attributeID": attribute_id})
-        if kind == "setAttribute":
-            value = _finite_number(source.get("value", 0), "Zielwert")
-            minimum, maximum = attribute.get("minimum"), attribute.get("maximum")
-            if minimum is not None and value < float(minimum):
-                raise ValueError(f"Zielwert für {attribute.get('name')} liegt unter dem Minimum")
-            if maximum is not None and value > float(maximum):
-                raise ValueError(f"Zielwert für {attribute.get('name')} liegt über dem Maximum")
-            result["value"] = value
-        elif not AutomationEngine._is_toggleable(attribute):
-            raise ValueError("Umschalten ist nur bei einem schreibbaren 0/1-Attribut möglich")
-        return result
-    if kind == "roborockCleaning":
-        node_id = int(_finite_number(source.get("nodeID", 0), "Roborock"))
-        node = nodes.get(node_id)
-        if not node or node.get("integration_module") != "roborock":
-            raise ValueError("Der gewählte Roborock läuft nicht als lokales Servermodul")
-        target = str(source.get("roborockTarget", "complete"))
-        if target not in ("complete", "room", "routine", "spot"):
-            raise ValueError("Das Roborock-Ziel ist ungültig")
-        result.update({
-            "nodeID": node_id, "roborockTarget": target,
-            "roborockTargetValue": _finite_number(source.get("roborockTargetValue", -1), "Reinigungsziel"),
-        })
-        for key in ("roborockCleaningType", "roborockSuction", "roborockWater"):
-            if source.get(key) not in (None, ""):
-                result[key] = _finite_number(source[key], key)
-        return result
-    if kind == "controlAutomation":
-        automation_id = str(source.get("automationID", "")).strip()
-        if not automation_id:
-            raise ValueError("Für die Automationssteuerung muss eine Zielautomation gewählt werden")
-        operation = str(source.get("automationOperation", "play"))
-        if operation not in ("play", "stop", "enable", "disable"):
-            raise ValueError("Der Automationsbefehl ist ungültig")
-        result.update({"automationID": automation_id, "automationOperation": operation})
-        return result
-    if kind == "serverPushNotification":
-        result.update({
-            "title": str(source.get("title") or "SmartHomeBoard")[:180],
-            "message": str(source.get("message") or "Automation wurde ausgeführt.")[:1500],
-            "includeAttributeValue": bool(source.get("includeAttributeValue", False)),
-            "pushDeviceIDs": [str(item) for item in source.get("pushDeviceIDs", []) if str(item)],
-        })
-        if result["includeAttributeValue"]:
-            node_id, attribute_id, _attribute = _automation_attribute(source, nodes)
-            result.update({"nodeID": node_id, "attributeID": attribute_id})
-        return result
-    raise ValueError("Diese Automationsaktion wird vom Webportal nicht unterstützt")
-
-
-def _automation_attribute(source, nodes):
-    node_id = int(_finite_number(source.get("nodeID", 0), "Gerät"))
-    attribute_id = int(_finite_number(source.get("attributeID", 0), "Attribut"))
-    node = nodes.get(node_id)
-    attribute = next((item for item in (node or {}).get("attributes", []) if int(item.get("id", 0)) == attribute_id), None)
-    if not node or not attribute:
-        raise ValueError("Das gewählte Gerät oder Attribut ist nicht mehr verfügbar")
-    return node_id, attribute_id, attribute
-
-
-def _finite_number(value, title):
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"{title} ist keine Zahl") from error
-    if not math.isfinite(number):
-        raise ValueError(f"{title} ist ungültig")
-    return number
+    """Keep the portal/API entry point while sharing its native validator."""
+    from .automation_validation import validate_web_automation as validate
+    return validate(source, nodes, database)
 
 
 def _display_widgets(values):
@@ -1005,6 +891,20 @@ async def load_homee_protocol(integration_id, category="", limit=50):
     )
     result = response.get("result", {}) if isinstance(response, dict) else {}
     return result if isinstance(result, dict) else {}
+
+
+async def load_connection_status():
+    response = await call_local_api("api/v1/connections", method="GET")
+    connections = response.get("connections", []) if isinstance(response, dict) else []
+    return connections if isinstance(connections, list) else []
+
+
+def _connection_api_error(error):
+    return {
+        "id": "server-runtime", "integration_name": "SmartHomeBoard",
+        "peer": "Hauptprozess", "protocol": "Interne API", "direction": "Intern",
+        "endpoint": "127.0.0.1", "state": "Nicht erreichbar", "error": str(error),
+    }
 
 
 def enocean_profiles():
@@ -1564,6 +1464,16 @@ async def health():
     return {"status": "ok", "version": VERSION, "modules": len(registry.modules), "instances": len(database.integrations()), "nodes": len(database.nodes()), "displays": len(database.displays())}
 
 
+@app.get("/api/v1/sonos/tts/{token}.mp3", include_in_schema=False)
+async def sonos_tts_audio(token: str):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,80}", token):
+        raise HTTPException(status_code=404, detail="Ansage wurde nicht gefunden")
+    file_path = Path(os.getenv("SHB_DATA_DIR", "/data")) / "sonos-tts" / f"{token}.mp3"
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Ansage wurde nicht gefunden")
+    return FileResponse(file_path, media_type="audio/mpeg", filename="ansage.mp3")
+
+
 @app.get("/api/v1/modules")
 async def modules():
     return {"modules": registry.manifests()}
@@ -1635,6 +1545,11 @@ async def integrations():
     return {"integrations": database.integrations()}
 
 
+@app.get("/api/v1/connections")
+async def connection_status():
+    return {"connections": runtime.connection_status()}
+
+
 @app.get("/api/v1/integrations/{integration_id}/state")
 async def integration_state(integration_id: str):
     if not database.integration(integration_id):
@@ -1703,6 +1618,28 @@ async def perform_integration_action(integration_id: str, action_id: str, comman
 @app.get("/api/v1/nodes")
 async def nodes():
     return {"sequence": runtime.sequence, "nodes": runtime.visible_nodes()}
+
+
+@app.put("/api/v1/nodes/{node_id}/enabled")
+async def set_device_enabled(node_id: int, payload: DeviceEnabledPayload):
+    try:
+        return await runtime.set_device_dashboard_enabled(node_id, payload.enabled)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error))
+
+
+@app.delete("/api/v1/nodes/{node_id}")
+async def delete_node(node_id: int):
+    try:
+        return await runtime.delete_device(node_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error))
 
 
 @app.put("/api/v1/nodes/{node_id}/attributes/{attribute_id}")

@@ -2,9 +2,21 @@
 
 Der Server hält Geräteverbindungen, Zustände und Automationen dauerhaft auf einem Raspberry Pi oder Linux-Rechner. iOS-App und Webportal dienen zur gemeinsamen Konfiguration und Anzeige.
 
+Externe KI-Anwendungen anbinden: [MCP einrichten, Homeegramme und Serverautomationen verwalten](MCP.md).
+
 ## Updates
 
-- **0.20.x:** Wertänderungs-Auslöser, lesbare Push-Werte und Schaltprotokoll.
+- **0.20.26 / iOS-Build 318:** MCP kann echte SHB-Serverautomationen mit allen nativ unterstützten Server-Auslösern, Bedingungen, Pfaden und Aktionen anlegen. Separate neue Freigaben für deaktiviertes Anlegen sowie Aktivieren/Deaktivieren; keine automatische Ausführung. Eigene SHB-IDs statt homee-HG-IDs, Gerätegruppen, sichere Push-Empfängerauswahl, Sonos, Roborock und Automationssteuerung. Bestehende App-/Serverregeln und unabhängige Zeitabläufe bleiben erhalten; UUID-Wiederholungen erzeugen keine Kopien und Aktivierungen benötigen Name und aktuelle Revision. Neue Rechte sind standardmäßig aus; nach dem Serverupdate MCP-Werkzeugliste neu laden bzw. neuen Chat öffnen.
+- **0.20.25 / iOS-Build 317 unverändert:** Mehrfachlöschung von HGs stoppt nicht mehr bei automatischer homee-Neusortierung oder beim Entfernen vorhandener Verweise auf bereits im selben Auftrag bestätigt gelöschte HGs. Vor dem nächsten HG wird der vollständige Bestand frisch geladen; verkürzte DELETE-Antworten lösen keinen falschen Abbruch aus. Echte Inhalts-/Identitätsänderungen, fehlende Freigaben und unbestätigte Löschungen stoppen weiterhin sicher. Ergebnis und Audit nennen einen sicheren Abbruchcode; Sicherungen und UUID-Schutz bleiben erhalten.
+- **0.20.24 / iOS-Build 317 unverändert:** HGs als Aktionen aktivieren, deaktivieren, abspielen oder stoppen sowie als Auslöser auf Auslösen, Stoppen, Aktivieren oder Deaktivieren eines Quell-HGs reagieren. In MCP anlegen, bearbeiten, lesen und im gemeinsamen grafischen Entwurf auswählen. Verweise bleiben auf die gewählte homee-Quelle begrenzt; Speichern führt kein referenziertes HG aus. Neue und bearbeitete HGs bleiben deaktiviert.
+- **0.20.23 / iOS-Build 317 unverändert:** Gruppen in HGs über MCP mit Namen, Mitgliedern, passenden Attributen und lesbaren Zielzuständen anzeigen; Gruppen/Relationships gezielt nachladen. Mehrere Original-Homeegramme gezielt löschen: explizite Liste mit 1–50 IDs und Namensbestätigungen derselben Quelle, gemeinsame Vorprüfung und nacheinander gesicherte, bestätigte Löschungen. Beim ersten Fehler oder unklaren Ergebnis wird gestoppt und der Stand pro HG gemeldet. Nutzt die vorhandene Löschfreigabe; keine Wildcards und kein automatisches Freischalten. Nach dem Update die MCP-Werkzeugliste neu laden.
+- **0.20.22 / iOS-Build 317:** Vollständiges Paket behebt den Startabbruch wegen fehlendem `server.homeegram_editing`. Neue getrennte KI-Freigaben für Aktivieren/Deaktivieren und gezieltes Bearbeiten von HG-Elementen. Echte interaktive MCP-App zum Ansehen und gemeinsamen Erstellen revisionierter Entwürfe; Versand nur ausdrücklich und deaktiviert. Der Chat-Client muss MCP Apps unterstützen und nach dem Serverupdate die Werkzeuge neu laden.
+- **0.20.21 / iOS-Build 316:** Homeegramme auch in der serververbundenen App bestätigt löschen. Direkte und verzögerte homee-Löschantworten werden korrekt erkannt; die App lädt die HG-Liste über den Server. Backup, genaue Quellen-/Namensprüfung und Schutz gegen wiederholte Löschbefehle bleiben erhalten.
+- **0.20.20:** Einzelne echte Homeegramme über MCP löschen: separate Freigabe, exakte Namensbestätigung, vollständige lokale Sicherung vor dem Löschen und Bestätigung durch homee. Wiederholte Anfragen senden keinen zweiten Löschbefehl.
+- **0.20.19:** KI kann mit getrennter Freigabe echte deaktivierte HGs auf homee anlegen und Servergeräte ein-/aus-/umschalten. Vorhandene KI-Entwürfe lassen sich in iOS bearbeiten und über die Serververbindung auf homee speichern. Kein direkter iPhone-homee-Zugang erforderlich.
+- **0.20.18:** Optionaler MCP-Zugang für externe KI-Clients: Messwerte lesen und deaktivierte HG-Entwürfe in SHB prüfen. Eigener widerrufbarer Schlüssel, keine Geräteausführung.
+- **0.20.17:** Homeegramm-Pfade mit Voraussetzungen, Immer-, Dann- und Sonst-Aktionen; manuelle Automationen ohne Auslöser.
+- **0.20.x:** Sonos-Steuerung und Sprachausgabe, Wertänderungs-Auslöser, lesbare Push-Werte und Schaltprotokoll.
 - **0.19.x:** Laufzeitstatus für Automationen und bidirektionale EnOcean-Rollläden.
 - **0.18.x:** Philips Hue und erweitertes EnOcean-Anlernen.
 - **0.17.x:** Shelly Gen2–4, Plus Add-on und BLU/BTHome.
@@ -65,6 +77,20 @@ Die Kopplung bleibt im persistenten `data`-Ordner gespeichert.
 - **Controller koppeln** auswählen.
 
 Controller II: Fronttaste kurz drücken. Controller I: Taste halten, bis die LEDs blinken. Die lokale API ist für private, nicht gewinnorientierte Nutzung vorgesehen.
+
+### Bosch Home Connect
+
+- Im Home Connect Developer Portal eine Anwendung mit Device Flow und den Scopes `IdentifyAppliance Monitor` anlegen.
+- Client-ID und optional Client-Secret speichern.
+- **Home Connect koppeln** wählen, den Code auf der Home-Connect-Seite eingeben und dort mit SingleKey ID anmelden.
+
+Die SingleKey-ID-Zugangsdaten bleiben ausschließlich bei Home Connect; der SHB-Server speichert nur die erteilten OAuth-Tokens. Geräte und Livewerte werden anschließend serverseitig über den Home-Connect-SSE-Strom aktualisiert. Die erste Version dient ausschließlich der Anzeige und startet keine Programme.
+
+### Sonos (lokal)
+
+- Das Sonos-Modul benötigt kein Cloudkonto und findet Lautsprecher per SSDP im lokalen Netz.
+- Wenn Docker oder ein VLAN Multicast blockiert, die IP-Adressen der Lautsprecher im Modul hinterlegen.
+- Wiedergabe/Pause, Lautstärke, Stumm, Stop, Titel vor/zurück, Gruppenlautstärke, Bass, Höhen und Loudness stehen als schreibbare Attribute für Serverautomationen bereit.
 
 ### Roborock
 

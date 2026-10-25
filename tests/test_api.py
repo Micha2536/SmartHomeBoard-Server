@@ -21,6 +21,66 @@ from server.main import SETUP_SESSION_COOKIE, app, setup_app
 
 
 class APITests(unittest.TestCase):
+    def test_native_homeegram_routes_mounted_with_admin_auth(self):
+        # No lifespan or real adapter is started. Reaching 404 after successful
+        # authentication verifies the router is mounted on the actual app.
+        missing = "/api/v1/integrations/not-an-installed-homee/homeegrams"
+        with patch.object(main, "ENV_API_TOKEN", "admin-test"):
+            client = TestClient(app)
+            try:
+                for headers in ({}, {"Authorization": "Bearer mcp-only"}):
+                    self.assertEqual(401, client.get(missing, headers=headers).status_code)
+                    self.assertEqual(401, client.post(missing + "/7/delete", headers=headers,
+                        json={"confirmation_name": "Test", "request_id": "7658270f-e361-48eb-adb2-451726fd7772"}).status_code)
+                admin = {"Authorization": "Bearer admin-test"}
+                self.assertEqual(404, client.get(missing, headers=admin).status_code)
+                self.assertEqual(404, client.post(missing + "/7/delete", headers=admin,
+                    json={"confirmation_name": "Test", "request_id": "7658270f-e361-48eb-adb2-451726fd7772"}).status_code)
+            finally:
+                client.close()
+
+    def test_mcp_mount_has_separate_authentication(self):
+        previous = main.database.setting("mcp_access", {})
+        # SDK session managers are intentionally single-lifespan. Other tests
+        # already started this global application; give this test a fresh mount.
+        fresh = main.MCPAccess(main.database, main.runtime, main.effective_api_token)
+        mount = next(route for route in app.routes if getattr(route, "path", None) == "/mcp")
+        try:
+            with patch.object(main, "ENV_API_TOKEN", "admin-test"), \
+                 patch.object(main, "mcp_access", fresh), patch.object(mount, "app", fresh.http_app), \
+                 patch.object(main.runtime, "start", AsyncMock()), patch.object(main.runtime, "shutdown", AsyncMock()), \
+                 patch.object(main.automation_engine, "start", AsyncMock()), patch.object(main.automation_engine, "stop", AsyncMock()), \
+                 TestClient(app) as client:
+                admin = {"Authorization": "Bearer admin-test"}
+                self.assertEqual(401, client.get("/api/v1/mcp").status_code)
+                client.put("/api/v1/mcp", headers=admin, json={"enabled": True})
+                token = client.post("/api/v1/mcp/rotate-token", headers=admin).json()["token"]
+                headers = {"Authorization": "Bearer " + token, "Accept": "application/json, text/event-stream"}
+                result = client.post("/mcp/", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+                self.assertEqual(200, result.status_code, result.text)
+                self.assertIn("tools", result.json()["result"])
+                self.assertEqual(401, client.get("/api/v1/nodes", headers=headers).status_code)
+                self.assertEqual(401, client.post("/mcp/", headers=admin).status_code)
+        finally:
+            main.database.set_setting("mcp_access", previous)
+
+    def test_web_validation_preserves_homee_paths_and_manual_rules(self):
+        nodes = [{"id": 10, "attributes": [{"id": 100, "type": 1, "editable": True, "minimum": 0, "maximum": 1}]}]
+        condition = {"id": "gate", "kind": "attribute", "nodeID": 10, "attributeID": 100, "comparison": "equal", "value": 1}
+        action = {"id": "always", "kind": "setAttribute", "nodeID": 10, "attributeID": 100, "value": 0}
+        source = {"id": "paths", "name": "Pfadtest", "triggers": [], "prerequisites": [condition],
+                  "conditions": [dict(condition, id="if")], "alwaysActions": [action], "actions": [],
+                  "directElseActions": [dict(action, id="else", value=1)], "conditionValidation": "both"}
+        result = main.validate_web_automation(source, nodes)
+        self.assertEqual([], result["triggers"])
+        self.assertEqual("gate", result["prerequisites"][0]["id"])
+        self.assertEqual("always", result["alwaysActions"][0]["id"])
+        self.assertEqual("else", result["directElseActions"][0]["id"])
+        self.assertEqual("both", result["conditionValidation"])
+        source["alwaysActions"] = []
+        source["directElseActions"] = []
+        with self.assertRaises(ValueError): main.validate_web_automation(source, nodes)
+
     def test_enocean_learning_form_has_searchable_ft55_variants(self):
         html = main.enocean_setup_html()
         self.assertIn('id="learningProfileSearch"', html)

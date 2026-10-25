@@ -112,7 +112,10 @@ class AutomationEngine:
         self.server_owned_ids.add(rule_id)
         self.deleted_ids.discard(rule_id)
         self._cancel_rule_tasks(rule_id)
-        self._persist_rules(f"Serverautomation {'aktualisiert' if previous else 'angelegt'}: {rule.get('name', 'Automation')}")
+        self._persist_rules(
+            f"Serverautomation {'aktualisiert' if previous else 'angelegt'}: {rule.get('name', 'Automation')}",
+            cancel_tasks=False,
+        )
 
     def delete_server(self, rule_id):
         self.refresh_from_database()
@@ -151,6 +154,7 @@ class AutomationEngine:
         self.refresh_from_database()
         result = {
             "count": len(self.rules),
+            "homee_path_version": 1,
             "synced_at": self.synced_at,
             "automations": [
                 self._automation_status(rule)
@@ -175,8 +179,14 @@ class AutomationEngine:
                     "name": rule.get("name", "Automation"),
                     "enabled": bool(rule.get("isEnabled", True)),
                     "trigger_count": len(rule.get("triggers", [])),
-                    "condition_count": len(rule.get("conditions", [])),
-                    "action_count": len(rule.get("actions", [])) + len(rule.get("elseActions", [])),
+                    "condition_count": len(rule.get("prerequisites", [])) + len(rule.get("conditions", [])) + len(rule.get("elseConditions", [])),
+                    "action_count": (
+                        len(rule.get("actions", []))
+                        + len(rule.get("alwaysActions", []))
+                        + len(rule.get("directElseActions", []))
+                        + len(rule.get("elseActions", []))
+                        + len(rule.get("elseElseActions", []))
+                    ),
                     "last_triggered_at": self.last_triggered.get(str(rule.get("id", ""))),
                     "origin": "server" if str(rule.get("id", "")) in self.server_owned_ids else "app",
                     "running": bool(timings),
@@ -249,13 +259,16 @@ class AutomationEngine:
 
     async def node_changed(self, previous, node):
         self.refresh_from_database()
-        old = {a["id"]: a for a in (previous or {}).get("attributes", [])}
+        old = {str(a["id"]): a for a in (previous or {}).get("attributes", [])}
         events = []
         for attribute in node.get("attributes", []):
-            before = old.get(attribute["id"], {}).get("current_value")
-            after = attribute.get("current_value")
-            if before is not None and after is not None and before != after:
-                events.append({"node_id": node["id"], "attribute_id": attribute["id"], "attribute_type": attribute.get("type"), "previous": before, "value": after,
+            previous_attribute = old.get(str(attribute["id"]), {})
+            before = self._automation_value(previous_attribute)
+            after = self._automation_value(attribute)
+            if before is not None and after is not None and abs(before - after) > 0.000001:
+                display_value, display_unit = self._display_attribute_value(attribute, after, attribute.get("unit", ""))
+                events.append({"node_id": int(node["id"]), "attribute_id": int(attribute["id"]), "attribute_type": attribute.get("type"), "previous": before, "value": after,
+                               "display_value": display_value, "unit": display_unit,
                                "device_name": node.get("name", "Gerät"), "attribute_name": attribute.get("name", "Wert")})
         for rule in self.rules:
             if not rule.get("isEnabled", True):
@@ -293,31 +306,39 @@ class AutomationEngine:
             self._record(rule, "info", message)
             return False, message
         validation = rule.get("conditionValidation", "triggerTime")
-        conditions = rule.get("conditions", [])
-        conditions_match = self._conditions_match(rule)
+        conditions = rule.get("prerequisites", []) + rule.get("conditions", [])
+        branch_name, selected_actions = self._selected_branch(rule)
         if conditions and validation in ("triggerTime", "both"):
-            selected_actions = rule.get("actions", []) if conditions_match else rule.get("elseActions", [])
             if not selected_actions:
-                message = f"{source} erkannt, aber UND-Bedingungen sind nicht erfüllt"
+                message = f"{source} erkannt, aber der gewählte Zweig {branch_name} enthält keine Aktion"
                 self._record(rule, "warning", message)
                 return False, message
-            scheduled_actions = [(action, conditions_match if validation == "both" else None) for action in selected_actions]
-            branch_name = "DANN" if conditions_match else "SONST"
+            expected_branch = branch_name if validation == "both" else None
+            always_ids = {action.get("id") for action in rule.get("alwaysActions", [])}
+            direct_ids = {action.get("id") for action in rule.get("directElseActions", [])}
+            scheduled_actions = [
+                (action, ("IMMER" if action.get("id") in always_ids else "UNWAHR" if action.get("id") in direct_ids else expected_branch)
+                 if validation == "both" else None) for action in selected_actions
+            ]
         elif conditions and validation == "executionTime":
+            else_branch = "SONST-WENN" if rule.get("elseConditions", []) else "SONST"
             scheduled_actions = (
-                [(action, True) for action in rule.get("actions", [])]
-                + [(action, False) for action in rule.get("elseActions", [])]
+                [(action, "IMMER") for action in rule.get("alwaysActions", [])]
+                + [(action, "DANN") for action in rule.get("actions", [])]
+                + [(action, "UNWAHR") for action in rule.get("directElseActions", [])]
+                + [(action, else_branch) for action in rule.get("elseActions", [])]
+                + [(action, "SONST") for action in rule.get("elseElseActions", [])]
             )
-            branch_name = "DANN/SONST"
+            branch_name = "DANN/SONST-WENN/SONST"
         else:
-            scheduled_actions = [(action, None) for action in rule.get("actions", [])]
+            scheduled_actions = [(action, None) for action in selected_actions]
             branch_name = "DANN"
         rule_id = str(rule.get("id", ""))
         self.last_triggered[rule_id] = now
         self.runtime.database.set_setting("automation_last_triggered", self.last_triggered)
         message = f"{source} angenommen – Zweig {branch_name} mit {len(scheduled_actions)} Aktion(en) gestartet"
         self._record(rule, "success", message)
-        for action, expected_conditions in scheduled_actions:
+        for action, expected_branch in scheduled_actions:
             key = f"{rule.get('id')}:{action.get('id')}"
             previous = self.action_tasks.pop(key, None)
             if previous:
@@ -329,19 +350,23 @@ class AutomationEngine:
                 "deadline": started_at + delay,
             }
             self.action_tasks[key] = asyncio.create_task(
-                self._execute(rule, action, event, key, expected_conditions=expected_conditions)
+                self._execute(rule, action, event, key, expected_branch=expected_branch)
             )
         return True, message
 
-    async def _execute(self, rule, action, event, key, expected_conditions=None):
+    async def _execute(self, rule, action, event, key, expected_branch=None):
         try:
             delay = max(0, float(action.get("delaySeconds", 0)))
             if delay:
                 self._record(rule, "info", f"Aktion {action.get('kind', 'unbekannt')} wartet {delay:g} Sekunden")
                 await asyncio.sleep(delay)
-            if expected_conditions is not None and self._conditions_match(rule) != expected_conditions:
-                expected_text = "erfüllt" if expected_conditions else "nicht erfüllt"
-                self._record(rule, "warning", f"Verzögerte Aktion übersprungen: Bedingungen sind nicht mehr {expected_text}")
+            current_branch = self._selected_branch(rule)[0]
+            branch_matches = current_branch != "BLOCKIERT" and (
+                expected_branch == "IMMER" or
+                (current_branch != "DANN" if expected_branch == "UNWAHR" else current_branch == expected_branch)
+            )
+            if expected_branch is not None and not branch_matches:
+                self._record(rule, "warning", f"Verzögerte Aktion übersprungen: Zweig {expected_branch} ist nicht mehr aktiv")
                 return
             kind = action.get("kind")
             if kind == "setAttribute":
@@ -386,6 +411,23 @@ class AutomationEngine:
                     raise ValueError("Dem Roborock fehlt die Server-Integrations-ID")
                 await self.runtime.integration_action(integration_id, "automation_cleaning", action)
                 result = "atomar am Roborock ausgeführt"
+            elif kind == "sonosSpeak":
+                node = self._node(int(action.get("nodeID", 0)))
+                if not node or node.get("integration_module") != "sonos":
+                    raise ValueError("Der ausgewählte Sonos-Lautsprecher ist nicht als aktive Serverintegration verfügbar")
+                integration_id = node.get("integration_id")
+                if not integration_id:
+                    raise ValueError("Dem Sonos-Lautsprecher fehlt die Server-Integrations-ID")
+                speech_action = dict(action)
+                speech_action["title"] = "Sonos"
+                speech_action["message"] = str(action.get("sonosText") or "")
+                _title, speech_text = self._push_text(speech_action, event)
+                payload = {"nodeID": int(action.get("nodeID", 0)), "text": speech_text,
+                           "restorePlayback": action.get("sonosRestorePlayback", True)}
+                if action.get("sonosVolume") not in (None, ""):
+                    payload["volume"] = float(action["sonosVolume"])
+                await self.runtime.integration_action(integration_id, "speak", payload)
+                result = "als Sonos-Sprachausgabe ausgeführt"
             elif kind == "controlAutomation":
                 target_id = action.get("automationID")
                 control_result = await self.control(
@@ -423,8 +465,10 @@ class AutomationEngine:
         replacements = {
             "{device}": str((event or {}).get("device_name", "")),
             "{deviceName}": str((event or {}).get("device_name", "")),
+            "{name}": str((event or {}).get("device_name", "")),
             "{attribute}": str((event or {}).get("attribute_name", "")),
-            "{value}": str((event or {}).get("value", "")),
+            "{value}": str((event or {}).get("display_value", (event or {}).get("value", ""))),
+            "{unit}": str((event or {}).get("unit", "")),
         }
         if action.get("includeAttributeValue"):
             node = self._node(int(action.get("nodeID", 0)))
@@ -521,7 +565,26 @@ class AutomationEngine:
         return f"{numeric:g}", unit
 
     def _conditions_match(self, rule):
-        return all(self._condition(condition) for condition in rule.get("conditions", []))
+        return self._condition_list_matches(rule.get("conditions", []))
+
+    def _condition_list_matches(self, conditions):
+        return all(self._condition(condition) for condition in conditions)
+
+    def _selected_branch(self, rule):
+        if not self._condition_list_matches(rule.get("prerequisites", [])):
+            return "BLOCKIERT", []
+        always = rule.get("alwaysActions", [])
+        if not rule.get("conditions", []):
+            return "DANN", always + rule.get("actions", [])
+        if self._condition_list_matches(rule.get("conditions", [])):
+            return "DANN", always + rule.get("actions", [])
+        else_conditions = rule.get("elseConditions", [])
+        direct_actions = rule.get("directElseActions", [])
+        if not else_conditions:
+            return "SONST", always + direct_actions + rule.get("elseActions", [])
+        if self._condition_list_matches(else_conditions):
+            return "SONST-WENN", always + direct_actions + rule.get("elseActions", [])
+        return "SONST", always + direct_actions + rule.get("elseElseActions", [])
 
     def _condition(self, condition):
         raw_matches = self._raw_condition(condition)
@@ -576,8 +639,13 @@ class AutomationEngine:
             attribute_type = trigger.get("attributeType")
             if attribute_type is not None and int(event.get("attribute_type") or -1) != int(attribute_type):
                 return False
+            if float(trigger.get("holdSeconds", 0) or 0) > 0:
+                self._condition(trigger)
+                # Held state transitions are emitted exclusively by _timer;
+                # another member event must not duplicate an elapsed hold.
+                return False
             return self._condition(trigger)
-        if int(trigger.get("nodeID", 0)) != event["node_id"] or int(trigger.get("attributeID", 0)) != event["attribute_id"]:
+        if int(trigger.get("nodeID", 0)) != int(event["node_id"]) or int(trigger.get("attributeID", 0)) != int(event["attribute_id"]):
             return False
         kind = trigger.get("kind")
         if kind == "attributeChanged":
@@ -588,6 +656,12 @@ class AutomationEngine:
                 change = 100 if event["previous"] == 0 and change else (change / abs(event["previous"]) * 100 if event["previous"] else 0)
             return self._compare(change, abs(float(trigger.get("value", 0))), trigger.get("comparison", "greater"))
         if kind == "attribute":
+            if float(trigger.get("holdSeconds", 0) or 0) > 0:
+                # Held thresholds are state conditions. Do not bypass their
+                # duration on the incoming edge; only the timer emits their
+                # false->true transition, even after the hold has elapsed.
+                self._condition(trigger)
+                return False
             return self._trigger_compare(
                 event["previous"],
                 event["value"],
@@ -642,7 +716,19 @@ class AutomationEngine:
 
     def _attribute_value(self, condition):
         attribute = self._attribute(condition)
-        return attribute.get("current_value") if attribute else None
+        return self._automation_value(attribute) if attribute else None
+
+    @staticmethod
+    def _automation_value(attribute):
+        if not attribute:
+            return None
+        value = attribute.get("current_value")
+        if value is None:
+            value = attribute.get("target_value")
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     def _attribute(self, reference):
         node = self._node(int(reference.get("nodeID", 0)))

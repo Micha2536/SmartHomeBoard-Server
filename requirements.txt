@@ -9,3 +9,7 @@ python-roborock==6.2.1
 boschshcpy==0.6.1
 cryptography==45.0.6
 zwave-js-server-python==0.72.0
+soco==0.31.0
+gTTS==2.5.4
+mutagen==1.48.1
+mcp==1.30.0

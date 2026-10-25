@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SHB · Homeegramme</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#f2f3f8; --surface:#fff; --text:#202430; --muted:#687083; --line:#dce0e9; --accent:#2864dc; --indigo:#6251de; --orange:#bd640d; --green:#148742; --red:#d53c4f; --blue:#2671d9; --shadow:0 8px 26px #15254809; --radius:19px; font-family:var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--color-background-primary,var(--bg)); color:var(--color-text-primary,var(--text)); font-size:14px; line-height:1.45; }
+    body[data-theme="dark"] { --bg:#171b24; --surface:#222735; --text:#f0f2f7; --muted:#adb5c6; --line:#414959; --accent:#87aeff; --indigo:#a69bff; --orange:#ffb263; --green:#6ad891; --red:#ff8794; --blue:#81b6ff; --shadow:none; }
+    button,input,select { font:inherit; }
+    button,select,input { min-height:44px; }
+    button { cursor:pointer; color:inherit; }
+    button:disabled { cursor:not-allowed; opacity:.48; }
+    button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+    button { border:1px solid var(--line); border-radius:12px; background:var(--surface); padding:10px 15px; font-weight:600; }
+    button:hover:not(:disabled) { filter:brightness(.97); }
+    .primary { color:#fff; background:#2864dc; border-color:#2864dc; }
+    .quiet { background:transparent; }
+    .danger { color:var(--red); }
+    .hidden,[hidden] { display:none!important; }
+    .app { max-width:1440px; margin:auto; padding:calc(20px + var(--safe-top,0px)) calc(22px + var(--safe-right,0px)) calc(24px + var(--safe-bottom,0px)) calc(22px + var(--safe-left,0px)); }
+    .topbar,.row,.title-row,.actions,.section-title,.node-top,.editor-title { display:flex; align-items:center; gap:10px; }
+    .topbar { justify-content:space-between; margin-bottom:19px; flex-wrap:wrap; }
+    .brand { display:flex; align-items:center; gap:12px; }
+    .brand-icon { display:grid; place-items:center; width:43px; height:43px; border-radius:13px; background:color-mix(in srgb,var(--accent) 11%,var(--surface)); color:var(--accent); font-size:25px; }
+    h1 { font-size:22px; letter-spacing:-.6px; line-height:1.2; margin:0; }
+    h2 { font-size:17px; margin:0; }
+    h3 { font-size:14px; margin:0; }
+    p { margin:5px 0 0; }
+    .muted,.subline { color:var(--muted); }
+    .subline { font-size:12px; margin-top:3px; }
+    .pill { display:inline-flex; align-items:center; gap:6px; padding:5px 9px; border-radius:20px; font-size:12px; font-weight:650; background:color-mix(in srgb,var(--accent) 10%,var(--surface)); color:var(--accent); }
+    .pill::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+    .pill.draft { color:var(--orange); background:color-mix(in srgb,var(--orange) 10%,var(--surface)); }
+    .panel { background:var(--color-background-secondary,var(--surface)); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); }
+    .library { display:grid; grid-template-columns:minmax(130px,.8fr) minmax(170px,1.3fr) minmax(170px,1.1fr) auto; gap:13px; padding:16px; margin-bottom:15px; align-items:end; }
+    label { display:block; font-weight:600; font-size:12px; color:var(--muted); }
+    label>input,label>select { margin-top:6px; }
+    input,select { width:100%; border:1px solid var(--line); border-radius:10px; background:var(--surface); color:var(--text); padding:9px 11px; min-width:0; }
+    input[type="checkbox"] { width:20px; min-height:20px; accent-color:#2864dc; margin:0; }
+    .banner { padding:12px 15px; margin:0 0 14px; border:1px solid color-mix(in srgb,var(--orange) 30%,var(--line)); background:color-mix(in srgb,var(--orange) 7%,var(--surface)); border-radius:12px; color:var(--text); }
+    .banner.error { border-color:color-mix(in srgb,var(--red) 45%,var(--line)); background:color-mix(in srgb,var(--red) 7%,var(--surface)); }
+    .banner.success { border-color:color-mix(in srgb,var(--green) 35%,var(--line)); background:color-mix(in srgb,var(--green) 7%,var(--surface)); }
+    .banner .row { justify-content:space-between; flex-wrap:wrap; }
+    .summary { padding:18px 20px; margin-bottom:16px; }
+    .title-row { justify-content:space-between; gap:18px; }
+    .summary input { font-size:18px; font-weight:650; max-width:620px; }
+    .summary-meta { display:flex; flex-wrap:wrap; gap:9px 18px; align-items:center; margin-top:11px; font-size:12px; color:var(--muted); }
+    .check { display:flex; align-items:center; gap:8px; color:var(--text); min-height:44px; }
+    .workspace { display:grid; grid-template-columns:minmax(0,1fr) 310px; align-items:start; gap:16px; }
+    .workspace.no-inspector { grid-template-columns:minmax(0,1fr); }
+    .flow-panel { min-width:0; overflow:hidden; }
+    .flow-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:17px 19px; border-bottom:1px solid var(--line); }
+    .legend { display:flex; align-items:center; flex-wrap:wrap; gap:12px; font-size:11px; color:var(--muted); }
+    .legend span { display:flex; align-items:center; gap:5px; }
+    .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:currentColor; flex-shrink:0; }
+    .flow-scroll { overflow:auto; overscroll-behavior:contain; padding:25px 24px 28px; max-height:800px; scrollbar-width:thin; }
+    .tree { --node-width:224px; --gap:28px; width:max-content; min-width:100%; display:flex; flex-direction:column; align-items:center; padding:0 0 7px; }
+    .flow-section { position:relative; display:flex; align-items:center; flex-direction:column; width:var(--node-width); }
+    .section-title { position:relative; justify-content:center; width:100%; font-size:12px; font-weight:800; letter-spacing:.35px; padding:0 4px; min-height:44px; color:var(--tone); }
+    .section-title .symbol { font-size:17px; }
+    .add { display:grid; place-items:center; flex:0 0 44px; width:44px; height:44px; min-height:44px; padding:0; background:transparent; color:var(--tone); border:0; border-radius:50%; font-size:23px; }
+    .add>span { width:23px; height:23px; display:grid; place-items:center; color:var(--surface); background:var(--tone); border-radius:50%; line-height:1; font-size:20px; font-weight:400; }
+    .node-stack { width:100%; display:flex; align-items:center; flex-direction:column; }
+    .node-wrap { width:100%; display:flex; align-items:center; flex-direction:column; }
+    .node-wrap+.node-wrap::before { content:attr(data-join); display:grid; place-items:center; height:29px; font-size:10px; font-weight:700; color:var(--muted); background:linear-gradient(var(--line),var(--line)) center / 2px 100% no-repeat; text-shadow:0 2px var(--surface),0 -2px var(--surface),2px 0 var(--surface),-2px 0 var(--surface); }
+    .node { width:100%; min-height:74px; display:flex; align-items:center; gap:9px; padding:12px 13px; text-align:left; border-radius:13px; border:1px solid color-mix(in srgb,var(--tone) 32%,var(--line)); background:color-mix(in srgb,var(--tone) 7%,var(--surface)); }
+    .node[aria-pressed="true"] { box-shadow:0 0 0 2px var(--tone); }
+    .node-text { flex:1; min-width:0; overflow-wrap:anywhere; }
+    .node-name { font-size:12px; font-weight:750; line-height:1.35; }
+    .node-detail { color:var(--muted); font-size:11px; margin-top:4px; line-height:1.4; }
+    .node-chevron { color:var(--muted); font-size:22px; font-weight:400; }
+    .delay { display:flex; align-items:center; gap:6px; padding:5px 10px; margin:0 0 8px; font-size:11px; color:var(--tone); border:1px solid color-mix(in srgb,var(--tone) 30%,var(--line)); border-radius:16px; background:var(--surface); }
+    .delay::after { content:""; position:absolute; bottom:0; }
+    .delay-wrap { display:flex; align-items:center; flex-direction:column; width:100%; }
+    .delay-wrap::after { content:""; height:9px; width:2px; background:var(--tone); margin-top:-8px; }
+    .empty-node { border-style:dashed; justify-content:center; min-height:63px; color:var(--tone); font-weight:600; font-size:12px; }
+    .stem { height:25px; width:2px; background:var(--line); flex-shrink:0; }
+    .stem.colored { background:var(--tone); }
+    .gate-note { font-size:10px; text-align:center; color:var(--muted); margin-top:7px; max-width:var(--node-width); }
+    .branch-group { display:flex; position:relative; gap:var(--gap); padding-top:22px; }
+    .branch-group::before { content:""; position:absolute; height:2px; top:0; left:calc(var(--node-width) / 2); right:calc(var(--node-width) / 2); background:var(--line); }
+    .branch-group:has(> .when-branch)::before { right:calc(var(--node-width) + var(--gap) / 2); }
+    .branch { display:flex; flex-direction:column; align-items:center; position:relative; }
+    .branch::before { content:""; position:absolute; top:-22px; height:22px; width:2px; background:var(--line); }
+    .branch.only::before { display:none; }
+    .branch-group.single::before { display:none; }
+    .branch-group.single { padding-top:0; }
+    .when-branch { min-width:calc(var(--node-width) * 2 + var(--gap)); }
+    .end { display:inline-block; padding:7px 14px; border:1px solid var(--line); border-radius:18px; color:var(--muted); background:var(--surface); font-size:11px; }
+    .end-wrap { width:var(--node-width); display:flex; align-items:center; flex-direction:column; }
+    .tree-footer { display:flex; gap:8px; padding:13px 19px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
+    .mobile-hint { display:none; font-size:11px; color:var(--muted); }
+    .inspector { padding:17px; position:sticky; top:12px; }
+    .editor-title { justify-content:space-between; margin-bottom:16px; }
+    .close { width:44px; height:44px; padding:0; border:0; background:transparent; font-size:24px; }
+    .field { margin-bottom:14px; }
+    .field-help { font-size:11px; color:var(--muted); margin:6px 0 0; }
+    .field-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .inspector .actions { justify-content:space-between; margin-top:19px; flex-wrap:wrap; }
+    .readout { white-space:pre-wrap; overflow-wrap:anywhere; background:color-mix(in srgb,var(--line) 25%,var(--surface)); border-radius:11px; padding:12px; font-size:12px; }
+    .group-members { margin:12px 0 18px; padding:0; list-style:none; }
+    .group-member { padding:12px 0; border-bottom:1px solid var(--line); overflow-wrap:anywhere; }
+    .group-member h4 { font-size:13px; margin:0 0 7px; }
+    .group-member p { font-size:12px; margin:5px 0; }
+    .group-attribute { margin-top:10px; padding-left:10px; border-left:2px solid var(--line); }
+    .group-warning { color:var(--orange); font-size:12px; overflow-wrap:anywhere; }
+    .bottom-bar { display:flex; align-items:center; justify-content:space-between; gap:15px; flex-wrap:wrap; margin-top:16px; padding:15px 18px; }
+    .bottom-bar .actions { flex-wrap:wrap; }
+    .save-state { font-size:12px; color:var(--muted); }
+    .empty { padding:44px 24px; text-align:center; max-width:520px; margin:12px auto; }
+    .empty .empty-symbol { font-size:42px; color:var(--accent); margin-bottom:12px; }
+    .empty button { margin-top:18px; }
+    .loading { padding:40px; text-align:center; color:var(--muted); }
+    dialog { border:1px solid var(--line); border-radius:20px; background:var(--surface); color:var(--text); padding:25px; max-width:440px; width:calc(100% - 30px); box-shadow:0 20px 90px #0004; }
+    dialog::backdrop { background:#10182b77; }
+    dialog .actions { justify-content:flex-end; flex-wrap:wrap; margin-top:22px; }
+    dialog p { margin-top:12px; }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+    @media(prefers-reduced-motion:no-preference) { button { transition:filter .15s,box-shadow .15s; } }
+    @media(max-width:1050px) { .library { grid-template-columns:1fr 1fr; } .workspace { grid-template-columns:minmax(0,1fr) 285px; } .tree { --node-width:203px; --gap:21px; } }
+    @media(max-width:760px) { .workspace { grid-template-columns:minmax(0,1fr); } .inspector { position:static; scroll-margin-top:15px; } .app { padding:calc(14px + var(--safe-top,0px)) calc(13px + var(--safe-right,0px)) calc(18px + var(--safe-bottom,0px)) calc(13px + var(--safe-left,0px)); } .summary { padding:16px; } .flow-scroll { padding:21px 16px; max-height:640px; } .mobile-hint { display:block; } .legend { display:none; } .tree { --node-width:187px; --gap:22px; } }
+    @media(max-width:450px) { h1 { font-size:20px; } .brand-icon { width:38px; height:38px; } .library { grid-template-columns:1fr; gap:11px; padding:14px; } .library .new { width:100%; } .topbar .pill { display:none; } .title-row { flex-wrap:wrap; gap:10px; } .bottom-bar .actions { width:100%; } .bottom-bar .actions button { flex:1; } .tree { --node-width:178px; --gap:20px; } }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand"><div class="brand-icon" aria-hidden="true">⌂</div><div><h1>Homeegramme</h1><div class="subline">SmartHomeBoard · gemeinsam mit der KI</div></div></div>
+      <span id="connection" class="pill">MCP-Verbindung wird aufgebaut</span>
+    </header>
+    <div id="banner" class="banner hidden" role="status"></div>
+    <div id="conflict" class="banner hidden" role="status"><div class="row"><span>Dieser Entwurf wurde an anderer Stelle geändert. Deine Eingaben bleiben erhalten.</span><button id="reload-conflict">Serverstand laden</button></div></div>
+    <section class="library panel" aria-label="Homeegramm auswählen">
+      <label>homee<select id="source"><option value="">Quelle auswählen</option></select></label>
+      <label>Auf homee ansehen<select id="homeegrams"><option value="">Homeegramm auswählen</option></select></label>
+      <label>Gemeinsamer Entwurf<select id="drafts"><option value="">Entwurf auswählen</option></select></label>
+      <button class="new primary" id="new-draft" disabled>＋ Neuer Entwurf</button>
+    </section>
+    <div id="loading" class="loading" role="status">Homeegramme werden geladen …</div>
+    <section id="empty" class="empty hidden"><div class="empty-symbol" aria-hidden="true">⑂</div><h2>Dein Homeegramm als Ablauf</h2><p class="muted">Wähle ein Homeegramm zum Ansehen oder beginne einen deaktivierten Entwurf. KI und Oberfläche arbeiten mit demselben gespeicherten Stand.</p></section>
+    <section id="summary" class="summary panel hidden" aria-label="Homeegramm">
+      <div class="title-row"><div id="view-name"><h2 id="name-title"></h2></div><label id="edit-name" class="hidden"><span class="sr-only">Name des Entwurfs</span><input id="name" maxlength="120" placeholder="Name des Homeegramms"></label><span id="mode-pill" class="pill"></span></div>
+      <div class="summary-meta"><span id="source-meta"></span><span id="revision-meta"></span><label id="manual-option" class="check hidden"><input id="manual-play" type="checkbox">Abspielen als Auslöser</label><span id="read-only-note"></span></div>
+    </section>
+    <div id="workspace" class="workspace no-inspector hidden">
+      <section class="flow-panel panel" aria-labelledby="flow-title">
+        <div class="flow-toolbar"><div><h2 id="flow-title">Grafischer Ablauf</h2><span class="mobile-hint">↔ Den Ablauf bei Bedarf seitlich bewegen</span></div><div class="legend"><span style="color:var(--indigo)"><i class="dot"></i>Auslöser</span><span style="color:var(--orange)"><i class="dot"></i>Bedingung</span><span style="color:var(--green)"><i class="dot"></i>DANN</span><span style="color:var(--red)"><i class="dot"></i>SONST</span></div></div>
+        <div id="flow-scroll" class="flow-scroll" tabindex="0" aria-label="Ablaufbaum, horizontal scrollbar"><div id="tree" class="tree"></div></div>
+        <div class="tree-footer"><span aria-hidden="true">ⓘ</span><span id="flow-help">Tippe einen Knoten an, um die Details zu sehen.</span></div>
+      </section>
+      <aside id="inspector" class="inspector panel hidden" aria-label="Element bearbeiten"></aside>
+    </div>
+    <footer id="bottom-bar" class="bottom-bar panel hidden"><div><div id="save-state" class="save-state"></div><div class="subline">Entwürfe schalten keine Geräte und laufen nicht automatisch.</div></div><div class="actions"><button id="ask-ai" class="quiet">Mit KI besprechen</button><button id="save" disabled>Entwurf speichern</button><button id="deploy" class="primary" disabled>Deaktiviert auf homee anlegen</button></div></footer>
+  </main>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title"><h2 id="confirm-title">Deaktiviert auf homee anlegen?</h2><p>Das Homeegramm wird auf dem ausgewählten homee angelegt. Es bleibt deaktiviert und wird nicht abgespielt. Bitte prüfe vorher Geräte, Bedingungen und Aktionen.</p><p id="confirm-summary" class="muted"></p><div class="actions"><button id="cancel-deploy">Abbrechen</button><button id="confirm-deploy" class="primary">Deaktiviert anlegen</button></div></dialog>
+  <dialog id="discard-dialog" aria-labelledby="discard-title"><h2 id="discard-title">Änderungen verwerfen?</h2><p id="discard-message"></p><div class="actions"><button id="keep-editing">Weiter bearbeiten</button><button id="discard-changes" class="danger">Änderungen verwerfen</button></div></dialog>
+  <div id="announcer" class="sr-only" aria-live="polite"></div>
+  <script>
+  (() => {
+    'use strict';
+    const $ = id => document.getElementById(id);
+    const state = { connected:false, canCall:false, initialized:false, hostOrigin:null, hostContext:{}, hostCapabilities:{}, pending:new Map(), rpcId:0, data:null, draft:null, baseRevision:null, dirty:false, conflict:false, selected:null, busy:false, poll:null, refreshBusy:false, formDirty:false, saveAttempt:null, deployAttempt:null, resultReceived:false, initialArgs:{}, destroyed:false };
+    const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
+    const uuid = () => globalThis.crypto?.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{ const r=Math.floor(Math.random()*16); return (c==='x'?r:(r&3|8)).toString(16); });
+    const tone = { triggers:'var(--indigo)', conditions:'var(--orange)', actions:'var(--blue)' };
+    const operators = { equal:'=',notEqual:'≠',greater:'>',less:'<',greaterOrEqual:'≥',lessOrEqual:'≤',changed:'ändert sich' };
+    const kinds = {triggers:'Auslöser',conditions:'Bedingung',actions:'Aktion'};
+    const hgOperations = {activate:'Aktivieren',deactivate:'Deaktivieren',play:'Abspielen',stop:'Stoppen'};
+    const hgTriggerEvents = {played:'Wird ausgelöst',stopped:'Wird gestoppt',activated:'Wird aktiviert',deactivated:'Wird deaktiviert'};
+    function el(tag, className, text) { const result=document.createElement(tag); if(className)result.className=className; if(text!=null)result.textContent=String(text); return result; }
+    function announce(text) { $('announcer').textContent=text; }
+    function showBanner(text, kind='') { const banner=$('banner'); banner.className='banner '+kind; banner.textContent=text; announce(text); }
+    function clearBanner() { $('banner').classList.add('hidden'); }
+    function deepMerge(target, incoming) { const merged={...target}; for(const [key,value] of Object.entries(incoming||{})) merged[key]=value && typeof value==='object' && !Array.isArray(value) ? deepMerge(merged[key]||{},value) : value; return merged; }
+    function applyContext(context) { state.hostContext=deepMerge(state.hostContext,context); const current=state.hostContext; if(current.theme==='light'||current.theme==='dark')document.body.dataset.theme=current.theme; for(const [key,value]of Object.entries(current.styles?.variables||{}))if(/^--[a-zA-Z0-9_-]+$/.test(key)&&typeof value==='string')document.documentElement.style.setProperty(key,value); for(const edge of ['top','right','bottom','left']){const value=current.safeAreaInsets?.[edge]; if(typeof value==='number'&&Number.isFinite(value))document.documentElement.style.setProperty('--safe-'+edge,Math.max(0,Math.min(200,value))+'px');} }
+    function post(message) { window.parent.postMessage({jsonrpc:'2.0',...message},state.hostOrigin&&state.hostOrigin!=='null'?state.hostOrigin:'*'); }
+    function notify(method, params={}) { if(state.connected&&!state.destroyed)post({method,params}); }
+    function rpc(method,params={},timeout=20000) { if(state.destroyed)return Promise.reject(new Error('Die Ansicht wurde geschlossen.')); const id='shb-'+(++state.rpcId); return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{state.pending.delete(id);reject(new Error('Die MCP-Anfrage wurde nicht rechtzeitig beantwortet. Bitte erneut versuchen.'));},timeout);state.pending.set(id,{resolve,reject,timer,method});post({id,method,params});}); }
+    function unwrap(result) { if(result?.isError)throw new Error((result.content||[]).filter(item=>item.type==='text').map(item=>item.text).join('\n')||'Der Server hat die Anfrage abgelehnt.'); if(result?.structuredContent)return result.structuredContent; if(result?.workspace)return result; for(const item of result?.content||[]){if(item.type==='text'){try{const parsed=JSON.parse(item.text);if(parsed?.workspace)return parsed;if(parsed?.structuredContent)return parsed.structuredContent;}catch{}}} if(result?.result)return unwrap(result.result); throw new Error('Der MCP-Server hat keine lesbaren Homeegramm-Daten zurückgegeben.'); }
+    async function callTool(name,args) { if(!state.canCall)throw new Error('Dieser MCP-Host erlaubt der Ansicht keine Server-Aufrufe. Öffne sie in einem Host mit MCP-Apps-Unterstützung.'); let result; if(state.useOpenAI)result=await window.openai.callTool(name,args);else result=await rpc('tools/call',{name,arguments:args},45000); return unwrap(result); }
+    function modelContext() { const workspace=state.data?.workspace; if(!workspace)return;const context={integration_id:workspace.integration_id,homeegram_id:workspace.homeegram_id||null,draft_id:workspace.draft_id||null,revision:state.baseRevision,name:state.draft?.name||workspace.name,selection:state.selected,unsaved_changes:state.dirty||state.formDirty}; if(state.hostCapabilities.updateModelContext)rpc('ui/update-model-context',{structuredContent:context,content:[{type:'text',text:'Aktuelle SHB-Homeegramm-Ansicht: '+JSON.stringify(context)}]}).catch(()=>{}); }
+    function editable() { return !!(state.canCall&&state.data?.workspace?.editable&&state.data?.permissions?.allow_drafts&&state.draft); }
+    function anyDirty() { return state.dirty||state.formDirty; }
+    function confirmDiscard(message) { if(state.discardResolver)return Promise.resolve(false);$('discard-message').textContent=message;return new Promise(resolve=>{state.discardResolver=resolve;$('discard-dialog').showModal();}); }
+    function resolveDiscard(answer) {const resolve=state.discardResolver;state.discardResolver=null;$('discard-dialog').close();resolve?.(answer);}
+    $('keep-editing').onclick=()=>resolveDiscard(false);$('discard-changes').onclick=()=>resolveDiscard(true);$('discard-dialog').addEventListener('cancel',event=>{event.preventDefault();resolveDiscard(false);});
+    async function askDiscard() { return !anyDirty()||await confirmDiscard('Der Entwurf enthält noch nicht gespeicherte Änderungen. Möchtest du sie verwerfen und einen anderen Stand öffnen?'); }
+    function selectedSource() { return state.data?.workspace?.integration_id||$('source').value||''; }
+    function setBusy(busy) { state.busy=busy; updateButtons(); }
+    function updateButtons() { const allowed=editable()&&!state.busy; $('new-draft').disabled=!state.canCall||state.busy||!state.data?.permissions?.allow_drafts||!$('source').value; $('save').disabled=!allowed||!state.dirty||state.formDirty||state.conflict; const deployment=state.data?.workspace?.deployment;const deploymentLocked=deployment&&deployment.status!=='failed';$('deploy').disabled=!allowed||!state.data?.permissions?.allow_homee_creation||anyDirty()||state.conflict||!state.draft?.actions?.length||!!deploymentLocked; $('ask-ai').disabled=!state.initialized||!state.hostCapabilities.message||state.busy||!state.data?.workspace?.name; for(const id of ['source','homeegrams','drafts'])$(id).disabled=state.busy||!state.canCall;for(const element of document.querySelectorAll('#name,#manual-play,#tree button,#inspector button,#inspector input,#inspector select'))element.disabled=state.busy; const workspace=state.data?.workspace; if(workspace?.mode==='draft')$('save-state').textContent=deploymentLocked?'Bereitstellung bereits angefragt · kein zweites Homeegramm anlegen':state.conflict?'Neuerer Serverstand vorhanden':state.formDirty?'Element bearbeiten · noch nicht übernommen':state.dirty?'Nicht gespeicherte Änderungen':'Gespeicherter Entwurf · Revision '+state.baseRevision; else $('save-state').textContent='Original auf homee · nur Ansicht'; }
+    function markDirty() { state.dirty=true;state.saveAttempt=null;state.deployAttempt=null;updateButtons();modelContext(); }
+    function option(select,value,label,selected=false) { const item=el('option','',label);item.value=String(value);item.selected=selected;select.append(item); }
+    function fillLibraries() { const data=state.data; const source=$('source');source.replaceChildren(); option(source,'','Quelle auswählen');for(const item of data.sources||[])option(source,item.id,item.name||item.id,item.id===data.workspace.integration_id);if(data.workspace.integration_id&&!Array.from(source.options).some(item=>item.value===data.workspace.integration_id))option(source,data.workspace.integration_id,data.workspace.source_name||'homee',true);const hgs=$('homeegrams');hgs.replaceChildren();option(hgs,'','Homeegramm auswählen');for(const item of data.catalog?.homeegrams||[])option(hgs,item.id,(item.active?'● ':'○ ')+(item.name||'Homeegramm '+item.id),Number(item.id)===Number(data.workspace.homeegram_id)&&data.workspace.mode==='view'); const drafts=$('drafts');drafts.replaceChildren();option(drafts,'','Entwurf auswählen');for(const item of data.catalog?.drafts||[])option(drafts,item.id,(item.name||'Entwurf')+' · R'+(item.revision??1),item.id===data.workspace.draft_id); }
+    function renderData(data,{poll=false}={}) { if(!data?.workspace)throw new Error('Der Server hat keinen Arbeitsbereich geliefert.'); if(poll&&anyDirty()){if(data.workspace.revision!==state.baseRevision){state.conflict=true;$('conflict').classList.remove('hidden');updateButtons();}return;}state.data=data;state.draft=clone(data.workspace.draft);state.baseRevision=data.workspace.revision??null;state.dirty=false;state.formDirty=false;state.conflict=false;state.selected=null;state.saveAttempt=null;state.deployAttempt=null;$('conflict').classList.add('hidden');$('loading').classList.add('hidden');fillLibraries(); const workspace=data.workspace;const visible=workspace.mode==='draft'||workspace.mode==='view';for(const id of ['summary','workspace','bottom-bar'])$(id).classList.toggle('hidden',!visible);$('empty').classList.toggle('hidden',visible);if(visible){const editing=editable();$('view-name').classList.toggle('hidden',editing);$('edit-name').classList.toggle('hidden',!editing);$('name-title').textContent=workspace.name||'Homeegramm';$('name').value=state.draft?.name||workspace.name||'';$('mode-pill').textContent=workspace.mode==='draft'?'Deaktivierter Entwurf':workspace.active?'Auf homee aktiv':'Auf homee deaktiviert';$('mode-pill').className='pill'+(workspace.mode==='draft'?' draft':'');$('source-meta').textContent=(workspace.source_name||'homee')+(workspace.homeegram_id?' · HG '+workspace.homeegram_id:'');$('revision-meta').textContent=workspace.draft_id?'Revision '+state.baseRevision:'';$('manual-option').classList.toggle('hidden',!editing);$('manual-play').checked=state.draft?.manual_play!==false;$('read-only-note').textContent=workspace.mode==='view'?'Original · Änderungen hier werden nicht an homee gesendet.':'Gemeinsam mit der KI bearbeitbar';$('flow-help').textContent=editing?'Knoten antippen zum Bearbeiten. Plus fügt ein Element hinzu; erst Speichern teilt deine Änderungen mit der KI.':'Knoten antippen für Details. Das Original bleibt unverändert.';renderTree();closeInspector(false);}if((workspace.warnings||[]).length)showBanner(workspace.warnings.join(' · '));updateButtons();modelContext(); }
+    const nodes=()=>state.data?.catalog?.nodes||[];
+    function findAttribute(item) { const node=nodes().find(n=>Number(n.id)===Number(item.node_id));const attribute=node?.attributes?.find(a=>Number(a.id)===Number(item.attribute_id));return {node,attribute}; }
+    function valueLabels(attribute,action=false) { if(action&&attribute?.action_labels&&Object.keys(attribute.action_labels).length)return attribute.action_labels;const type=Number(attribute?.type);if(attribute?.value_labels&&Object.keys(attribute.value_labels).length&&(!action||![1,135].includes(type)))return attribute.value_labels;const labels={1:action?['Ausschalten','Einschalten']:['Aus','An'],10:['Geschlossen','Offen','Gekippt'],14:['Geschlossen','Offen'],25:['Keine Bewegung','Bewegung erkannt'],76:['Keine Bewegung','Bewegung erkannt'],135:action?['Öffnen','Schließen','Stoppen']:['Geöffnet','Geschlossen','Gestoppt','Öffnet','Schließt'],205:['Zuhause','Schlafend','Abwesend','Urlaub'],243:['Sonnig','Klar','Regen','Schnee','Schneeregen','Windig','Nebel','Bewölkt','Teilweise bewölkt (Tag)','Teilweise bewölkt (Nacht)','Hagel','Gewitter','Tornado'],246:['Sonnig','Klar','Regen','Schnee','Schneeregen','Windig','Nebel','Bewölkt','Teilweise bewölkt (Tag)','Teilweise bewölkt (Nacht)','Hagel','Gewitter','Tornado']}[type];return labels?Object.fromEntries(labels.map((label,index)=>[index,label])):{}; }
+    function valueText(item,attribute,action=false) { const labels=valueLabels(attribute,action);return labels[String(item.value)]??(String(item.value??'–')+(attribute?.unit?' '+attribute.unit:'')); }
+    function prettyDuration(seconds) { const value=Number(seconds);if(!Number.isFinite(value)||value<=0)return '';if(value%86400===0)return value/86400+' Tage';if(value%3600===0)return value/3600+' Std.';if(value%60===0)return value/60+' Min.';return value+' Sek.'; }
+    function groupDescription(item) {
+      if(!item.group||typeof item.group!=='object')return null;
+      const group=item.group,members=Array.isArray(group.members)?group.members:[],homeegrams=Array.isArray(group.homeegrams)?group.homeegrams:[];
+      const preview=members.slice(0,2).map(member=>member.name||'Gerät '+member.node_id).join(', ');
+      const incomplete=group.missing_relationships||group.membership_complete===false;
+      const count=members.length+' Geräte'+(incomplete?' geladen':'')+(homeegrams.length?' · '+homeegrams.length+' Homeegramm-Mitglieder':'');
+      return {name:'Gruppe · '+(group.name||'ID '+(group.id??item.group_id??'–')),detail:[item.summary||'Original-Gruppenelement',count,group.missing?'Gruppe fehlt':incomplete?'Mitgliedschaften unvollständig':'',preview+(members.length>2?' + '+(members.length-2)+' weitere':'')].filter(Boolean).join(' · ')};
+    }
+    function homeegramReference(item,kind) {
+      if(item.type!=='homeegram'&&!item._category?.startsWith('homeegram_'))return null;
+      const key=kind==='actions'?'target_homeegram':'source_homeegram';
+      const projected=item[key];
+      const id=item[key+'_id']??projected?.id;
+      const catalog=(state.data?.catalog?.homeegrams||[]).find(hg=>Number(hg.id)===Number(id));
+      const reference=projected||catalog;
+      return {id,name:reference?.name||'Homeegramm '+(id??'unbekannt'),active:reference?.active,
+        missing:reference?.missing===true||(!projected&&!catalog),key};
+    }
+    function homeegramDescription(item,kind) {
+      const reference=homeegramReference(item,kind);if(!reference)return null;
+      const code=Number(item.homeegram_eventcode??item.homeegram_event);
+      const nativeOperation={1:'activate',2:'deactivate',3:'play',4:'stop'}[code];
+      const nativeTrigger={1:'activated',2:'deactivated',3:'played',4:'stopped'}[code];
+      const event=kind==='actions'?hgOperations[item.operation||nativeOperation]:kind==='conditions'?({1:'Ist aktiviert',2:'Ist deaktiviert',3:'Wird gerade abgespielt',4:'Ist gestoppt'}[code]):hgTriggerEvents[item.event||nativeTrigger];
+      return {name:'Homeegramm · '+reference.name,detail:[item.summary||item.event_label||event||'Unbekanntes Homeegramm-Ereignis',reference.missing?'Homeegramm fehlt auf dieser Quelle':''].filter(Boolean).join(' · ')};
+    }
+    function describe(item,kind) { const group=groupDescription(item);if(group)return group;const hg=homeegramDescription(item,kind);if(hg)return hg;if(item._description)return {name:item._name||kinds[kind],detail:item._description};if(item._category==='switch_triggers')return {name:'Abspielen',detail:'Wenn dieses Homeegramm abgespielt wird (Play)'};if(item._category?.startsWith('time_')){const frequency=/FREQ=([^;]+)/.exec(item.rrule||'')?.[1];const hour=/BYHOUR=([^;]+)/.exec(item.rrule||'')?.[1];const minute=/BYMINUTE=([^;]+)/.exec(item.rrule||'')?.[1];const labels={DAILY:'Täglich',WEEKLY:'Wöchentlich',MONTHLY:'Monatlich',HOURLY:'Stündlich',MINUTELY:'Minütlich'};return {name:'Zeit',detail:[labels[frequency]||'Einmalig',hour!=null?hour.padStart(2,'0')+':'+(minute||'0').padStart(2,'0')+' Uhr':'',item.duration?'Dauer '+item.duration:'',item.dtstart?'Start '+item.dtstart:''].filter(Boolean).join(' · ')};}const {node,attribute}=findAttribute(item);const name=node?.name||((item.node_id!=null)?'Fehlendes Gerät · ID '+item.node_id:categoryName(item._category||kind));let detail=attribute?.name||((item.attribute_id!=null)?'Attribut '+item.attribute_id:'');if(item.comparison==='changed')detail+=' · bei jeder Änderung';else if(kind==='actions')detail+=' · '+(item.operation==='toggle'||Number(item.command)===3?'Schalter umschalten':valueText(item,attribute,true));else if(item.value!=null)detail+=' '+(operators[item.comparison]||operatorRaw(item.operator,kind))+' '+valueText(item,attribute);if(kind==='conditions'&&item.check_moment)detail+=' · '+({1:'beim Auslösen',2:'beim Ausführen',3:'beim Auslösen und Ausführen'}[item.check_moment]||'');return {name,detail:detail.replace(/^ · /,'')||'Originalelement auf homee'}; }
+    function categoryName(category) { return ({attribute_triggers:'Gerät',attribute_conditions:'Gerät',attribute_actions:'Gerät',time_triggers:'Zeit',time_conditions:'Zeit',switch_triggers:'Abspielen',webhook_triggers:'WebHook',webhook_actions:'WebHook',homeegram_triggers:'Homeegramm',homeegram_conditions:'Homeegramm',homeegram_actions:'Homeegramm',celestial_triggers:'Sonnenstand',celestial_conditions:'Sonnenstand',plan_triggers:'Plan',plan_conditions:'Plan',plan_actions:'Plan',group_triggers:'Gruppe',group_conditions:'Gruppe',group_actions:'Gruppe',user_triggers:'Anwesenheit',user_conditions:'Anwesenheit',user_actions:'Anwesenheit',notification_actions:'Benachrichtigung',tts_actions:'Sprachausgabe'})[category]||'Originalelement'; }
+    function operatorRaw(value,kind) {return kind==='conditions'?({1:'=',2:'≤',3:'≥',4:'<',5:'>',6:'≠'}[value]||'='):({1:'>',2:'<',3:'=',4:'ändert sich'}[value]||'=');}
+    function originalItems(kind) { const groups=state.data?.workspace?.homeegram?.[kind]||{};const items=[];for(const [category,rows]of Object.entries(groups))if(Array.isArray(rows))for(const row of rows)items.push({...row,_category:category});return items; }
+    function flowItems(kind) { return state.draft?state.draft[kind].map((item,index)=>({...item,_index:index})):originalItems(kind); }
+    function stem(parent,color) {const line=el('div','stem'+(color?' colored':''));if(color)line.style.setProperty('--tone',color);line.setAttribute('aria-hidden','true');parent.append(line);}
+    function section(parent,{title,symbol,color,kind,branch,items,join='UND',emptyLabel,emptyEnd=false}) {const wrapper=el('section','flow-section');wrapper.style.setProperty('--tone',color); const heading=el('div','section-title');if(symbol)heading.append(el('span','symbol',symbol));heading.append(el('span','',title));if(editable()&&kind){const add=el('button','add');add.setAttribute('aria-label',kinds[kind]+' hinzufügen: '+title);add.append(el('span','','+'));add.onclick=()=>openEditor(kind,null,branch);heading.append(add);}wrapper.append(heading);const stack=el('div','node-stack');for(const [position,item]of items.entries()){const outer=el('div','node-wrap');outer.dataset.join=join;const delay=prettyDuration(item.delay);if(delay){const delayWrap=el('div','delay-wrap');delayWrap.append(el('div','delay','◷ '+delay+' warten'));outer.append(delayWrap);}const info=describe(item,kind);const node=el('button','node');node.setAttribute('aria-label',info.name+'. '+info.detail);const dot=el('span','dot');dot.style.color=color;node.append(dot);const text=el('span','node-text');text.append(el('span','node-name',info.name),el('div','node-detail',info.detail));node.append(text,el('span','node-chevron','›'));node.onclick=()=>state.draft&&item._index!=null?openEditor(kind,item._index,branch):openReadOnly(item,kind,position);outer.append(node);stack.append(outer);}if(!items.length){if(editable()&&kind&&emptyLabel){const add=el('button','node empty-node',emptyLabel);add.onclick=()=>openEditor(kind,null,branch);stack.append(add);}else if(emptyEnd)stack.append(el('span','end','Ende · keine Aktion'));else stack.append(el('div','gate-note',kind==='conditions'?'Keine zusätzliche Bedingung':'Keine Elemente'));}wrapper.append(stack);parent.append(wrapper);return wrapper;}
+    function renderTree() {const root=$('tree');root.replaceChildren();const triggers=flowItems('triggers'),conditions=flowItems('conditions'),actions=flowItems('actions');if(state.draft?.manual_play)triggers.push({_category:'switch_triggers'});section(root,{title:'WENN · einer genügt',symbol:'ϟ',color:tone.triggers,kind:'triggers',items:triggers,join:'ODER',emptyLabel:'Auslöser hinzufügen'});stem(root,tone.triggers);const hasPaths=!!state.draft||conditions.some(item=>Number(item.branch)===1)||actions.some(item=>Number(item.branch)===1||Number(item.branch)===2);const global=conditions.filter(item=>Number(item.branch||0)===0);if(global.length||(!hasPaths&&editable())){const gate=section(root,{title:hasPaths?'BEDINGUNGEN · immer':'NUR WENN · alle',symbol:'◆',color:tone.conditions,kind:'conditions',branch:0,items:global,emptyLabel:'Bedingung hinzufügen'});gate.append(el('div','gate-note','Alle müssen erfüllt sein · sonst Ende'));stem(root,tone.conditions);}else if(hasPaths&&editable()){const addGlobal=el('button','quiet','＋ Immer-Bedingung hinzufügen');addGlobal.style.color=tone.conditions;addGlobal.onclick=()=>openEditor('conditions',null,0);root.append(addGlobal);stem(root,tone.conditions);}if(!hasPaths){section(root,{title:'DANN · wahr',symbol:'✓',color:'var(--green)',kind:'actions',branch:0,items:actions.filter(item=>Number(item.branch||0)===0),emptyEnd:true});return;}const forks=el('div','branch-group');const always=el('div','branch');section(always,{title:'IMMER',symbol:'↓',color:'var(--blue)',kind:'actions',branch:0,items:actions.filter(item=>Number(item.branch||0)===0),emptyLabel:'Aktion hinzufügen',emptyEnd:true});always.append(el('div','gate-note','Nach den Immer-Bedingungen · unabhängig von WENN'));const when=el('div','branch when-branch');const ifConditions=conditions.filter(item=>Number(item.branch)===1);section(when,{title:'WENN-BEDINGUNGEN · alle',symbol:'◆',color:tone.conditions,kind:'conditions',branch:1,items:ifConditions,emptyLabel:'Wenn-Bedingung hinzufügen'});if(!ifConditions.length)when.append(el('div','gate-note','Ohne WENN-Bedingung gilt DANN'));stem(when,tone.conditions);const outcomes=el('div','branch-group');const yes=el('div','branch'),no=el('div','branch');section(yes,{title:'DANN · wahr',color:'var(--green)',kind:'actions',branch:1,items:actions.filter(item=>Number(item.branch)===1),emptyLabel:'Aktion hinzufügen',emptyEnd:true});section(no,{title:'SONST · unwahr',color:'var(--red)',kind:'actions',branch:2,items:actions.filter(item=>Number(item.branch)===2),emptyLabel:'Aktion hinzufügen',emptyEnd:true});outcomes.append(yes,no);when.append(outcomes);forks.append(always,when);root.append(forks);}
+    function centerNewWorkspace() {const workspace=state.data?.workspace;if(!workspace)return;const key=[workspace.integration_id,workspace.mode,workspace.draft_id||workspace.homeegram_id||''].join(':');if(state.centeredWorkspaceKey===key)return;state.centeredWorkspaceKey=key;const center=()=>{const area=$('flow-scroll');if(area.clientWidth>0)area.scrollLeft=Math.max(0,(area.scrollWidth-area.clientWidth)/2);};if(typeof window.requestAnimationFrame==='function')window.requestAnimationFrame(center);else setTimeout(center,0);}
+    function closeInspector(update=true) {state.selected=null;state.formDirty=false;$('inspector').replaceChildren();$('inspector').classList.add('hidden');$('workspace').classList.add('no-inspector');centerNewWorkspace();if(update){updateButtons();modelContext();}}
+    function inspectorHeader(title) {const panel=$('inspector');panel.replaceChildren();panel.classList.remove('hidden');$('workspace').classList.remove('no-inspector');const header=el('div','editor-title');header.append(el('h2','',title));const close=el('button','close','×');close.setAttribute('aria-label','Element schließen');close.onclick=async()=>{if(!state.formDirty||await confirmDiscard('Änderungen an diesem Element verwerfen?'))closeInspector();};header.append(close);panel.append(header);return panel;}
+    function groupReadOnly(panel,item,kind) {
+      const group=item.group;if(!group||typeof group!=='object')return;
+      const members=Array.isArray(group.members)?group.members:[],homeegrams=Array.isArray(group.homeegrams)?group.homeegrams:[];
+      panel.append(el('p','field-help','Gruppen-ID '+(group.id??item.group_id??'–')+' · nur Ansicht. Gruppenmitglieder werden hier nicht bearbeitet.'));
+      const warnings=[];
+      if(group.missing)warnings.push('Diese Gruppe fehlt auf der ausgewählten homee-Quelle.');
+      if(group.missing_relationships)warnings.push('Mitgliedschaften wurden noch nicht geladen. Die Liste kann unvollständig sein.');
+      else if(group.membership_complete===false)warnings.push('Die Mitgliedschaften sind unvollständig.');
+      for(const warning of Array.isArray(group.warnings)?group.warnings:[])if(typeof warning==='string')warnings.push(warning);
+      for(const warning of new Set(warnings))panel.append(el('p','group-warning',warning));
+      panel.append(el('h3','','Geräte in dieser Gruppe ('+members.length+')'));
+      const list=el('ul','group-members');
+      for(const member of members){
+        const entry=el('li','group-member');entry.append(el('h4','',(member.name||'Unbekanntes Gerät')+' · Geräte-ID '+(member.node_id??'–')));
+        if(member.missing)entry.append(el('p','group-warning','Gerät fehlt auf dieser homee-Quelle.'));
+        if(member.missing_attribute)entry.append(el('p','group-warning','Passendes Attribut fehlt.'));
+        if(member.applicable===false)entry.append(el('p','muted','Für dieses Gruppenelement nicht anwendbar.'));
+        const attributes=Array.isArray(member.attributes)?member.attributes:[];
+        for(const attribute of attributes){
+          const detail=el('div','group-attribute');detail.append(el('p','',(attribute.name||'Eigenschaft')+' · Attribut-ID '+(attribute.id??'–')+(attribute.type!=null?' · Typ '+attribute.type:'')));
+          const target=attribute.target_value_label??(kind==='actions'&&(item.operation==='toggle'||Number(item.command)===3)?'Schalter umschalten':item.value!=null?valueText(item,attribute,kind==='actions'):'Nicht angegeben');
+          const current=attribute.current_value_label??(attribute.current_value!=null?valueText({value:attribute.current_value},attribute):'Kein Cachewert');
+          detail.append(el('p','','Zielwert: '+target),el('p','muted','Aktuell (Cache): '+current));
+          if(kind==='actions'&&attribute.editable===false)detail.append(el('p','group-warning','Attribut ist nicht schreibbar.'));
+          entry.append(detail);
+        }
+        if(!attributes.length&&!member.missing_attribute)entry.append(el('p','muted','Keine passenden Attribute verfügbar.'));
+        list.append(entry);
+      }
+      if(!members.length)list.append(el('li','group-member',group.membership_complete===true?'Keine Geräte-Mitglieder.':'Keine Geräte-Mitglieder geladen.'));
+      panel.append(list);
+      if(homeegrams.length){
+        panel.append(el('h3','','Homeegramm-Mitglieder ('+homeegrams.length+')'));
+        const hgs=el('ul','group-members');
+        for(const hg of homeegrams){const entry=el('li','group-member');entry.append(el('h4','',(hg.name||'Unbekanntes Homeegramm')+' · HG-ID '+(hg.homeegram_id??'–')),el('p','muted','Kein Gerät · für dieses Geräte-Attribut nicht anwendbar.'));if(hg.missing)entry.append(el('p','group-warning','Homeegramm fehlt auf dieser homee-Quelle.'));hgs.append(entry);}panel.append(hgs);
+      }
+    }
+    async function openReadOnly(item,kind,index) {if(state.formDirty&&!await confirmDiscard('Änderungen an diesem Element verwerfen?'))return;state.selected={kind,index,read_only:true,element_id:item.id??null};const panel=inspectorHeader(kinds[kind]+' ansehen');const info=describe(item,kind);panel.append(el('h3','',info.name),el('p','muted',info.detail));groupReadOnly(panel,item,kind);const reference=homeegramReference(item,kind);if(reference){panel.append(el('h3','',kind==='actions'?'Ziel-Homeegramm':'Quell-Homeegramm'),el('p','',reference.name+' · HG-ID '+(reference.id??'unbekannt')));if(reference.missing)panel.append(el('p','group-warning','Homeegramm fehlt auf dieser homee-Quelle.'));else if(reference.active!=null)panel.append(el('p','muted','Status (Cache): '+(reference.active?'Aktiviert':'Deaktiviert')));}const raw=Object.fromEntries(Object.entries(item).filter(([key])=>!key.startsWith('_')));panel.append(el('p','field-help','Original auf homee · diese Ansicht verändert es nicht.'));const details=el('details');details.append(el('summary','','Technische Details'));details.append(el('pre','readout',JSON.stringify(raw,null,2)));panel.append(details);modelContext();if(window.innerWidth<=760)panel.scrollIntoView({behavior:'smooth',block:'start'});}
+    function field(parent,title,control,help) {const wrapper=el('div','field'),label=el('label','',title);label.append(control);wrapper.append(label);if(help)wrapper.append(el('p','field-help',help));parent.append(wrapper);return control;}
+    function selectControl(values,current) {const select=el('select');for(const [value,label]of values)option(select,value,label,String(value)===String(current));return select;}
+    function inputControl(type,value) {const input=el('input');input.type=type;input.value=value??'';return input;}
+    async function openEditor(kind,index,branch) {
+      if(!editable())return;
+      if(state.formDirty&&!await confirmDiscard('Änderungen an diesem Element verwerfen?'))return;
+      state.formDirty=false;state.selected={kind,index,branch};
+      const existing=index!=null?state.draft[kind][index]:null;
+      const panel=inspectorHeader(kinds[kind]+(existing?' bearbeiten':' hinzufügen'));
+      const form=el('form');form.noValidate=true;
+      const elementType=kind==='conditions'?null:selectControl([['device','Gerät'],['homeegram','Homeegramm']],existing?.type==='homeegram'?'homeegram':'device');
+      if(elementType)field(form,kind==='actions'?'Aktion für':'Auslöser durch',elementType,'Alle Auswahlmöglichkeiten gehören zur ausgewählten homee-Quelle.');
+      const body=el('div');form.append(body);
+      let device=null,attribute=null,comparison=null,operation=null,value=null,checkMoment=null,path=null,delay=null,hgTarget=null,hgEvent=null;
+      const availableHomeegrams=()=>state.data?.catalog?.homeegrams||[];
+      function touch(){state.formDirty=true;updateButtons();modelContext();}
+      function populatePath(parent){
+        if(kind==='conditions'){
+          path=selectControl([[0,'Immer-Bedingung · gilt für alle Pfade'],[1,'WENN-Bedingung · entscheidet DANN / SONST']],existing?.branch??branch??1);
+          field(parent,'Bedingungsgruppe',path);
+          checkMoment=selectControl([[1,'Beim Auslösen'],[2,'Beim Ausführen der Aktionen'],[3,'Beim Auslösen und Ausführen']],existing?.check_moment??1);
+          field(parent,'Prüfzeitpunkt',checkMoment);
+        }
+        if(kind==='actions'){
+          path=selectControl([[0,'IMMER · unabhängig von WENN'],[1,'DANN · wenn WENN wahr ist'],[2,'SONST · wenn WENN unwahr ist']],existing?.branch??branch??1);
+          field(parent,'Aktionspfad',path);
+          delay=inputControl('number',existing?.delay??0);delay.min='0';delay.max='604800';delay.step='1';
+          field(parent,'Verzögerung in Sekunden',delay,'Die Wartezeit erscheint direkt im Ablauf.');
+        }
+      }
+      function trackControls(parent){for(const control of parent.querySelectorAll('select,input'))if(!control.oninput&&!control.onchange)control.onchange=touch;}
+      function populateHomeegram(){
+        const existingId=kind==='actions'?existing?.target_homeegram_id:existing?.source_homeegram_id;
+        hgTarget=selectControl([['','Homeegramm auswählen'],...availableHomeegrams().filter(hg=>Number.isSafeInteger(Number(hg.id))&&Number(hg.id)>0).map(hg=>[hg.id,(hg.name||'Homeegramm '+hg.id)+' · HG '+hg.id])],existingId??'');
+        if(existingId&&!availableHomeegrams().some(hg=>Number(hg.id)===Number(existingId)))option(hgTarget,existingId,'Fehlendes Homeegramm · HG '+existingId,true);
+        field(body,kind==='actions'?'Ziel-Homeegramm':'Quell-Homeegramm',hgTarget,'Nur bereits auf dieser homee-Quelle vorhandene Homeegramme können ausgewählt werden.');
+        if(kind==='actions'){
+          operation=selectControl(Object.entries(hgOperations),existing?.type==='homeegram'?existing.operation:'play');
+          field(body,'Homeegramm-Befehl',operation,'Diese Aktion wird nur im Entwurf gespeichert. Sie führt jetzt keinen Befehl aus.');
+        }else{
+          hgEvent=selectControl(Object.entries(hgTriggerEvents),existing?.type==='homeegram'?existing.event:'played');
+          field(body,'Auslösen, wenn dieses Homeegramm',hgEvent,'Dies ist ein anderes Homeegramm als der eigene manuelle Play-Auslöser.');
+        }
+        populatePath(body);trackControls(body);
+      }
+      function populateDevice(){
+        const eligibleNodes=nodes().filter(node=>(node.attributes||[]).some(attribute=>kind!=='actions'||attribute.editable));
+        device=selectControl([['','Gerät auswählen'],...eligibleNodes.map(node=>[node.id,node.name||'Gerät '+node.id])],existing?.node_id??'');
+        field(body,'Gerät auf homee',device,'Es werden nur Geräte dieser homee-Quelle angeboten.');
+        attribute=selectControl([['','Attribut auswählen']],'');field(body,'Eigenschaft',attribute);
+        const details=el('div');body.append(details);
+        function populateAttributes(preferred){
+          attribute.replaceChildren();option(attribute,'','Attribut auswählen');
+          const node=eligibleNodes.find(item=>Number(item.id)===Number(device.value));
+          for(const item of node?.attributes||[])if(kind!=='actions'||item.editable)option(attribute,item.id,item.name||'Attribut '+item.id,Number(item.id)===Number(preferred));
+          if(!preferred&&attribute.options.length>1)attribute.selectedIndex=1;
+          populateDetails();
+        }
+        function populateDetails(){
+          details.replaceChildren();const found=findAttribute({node_id:device.value,attribute_id:attribute.value}).attribute;
+          if(kind==='actions'){
+            const options=[['set','Wert setzen']];if(Number(found?.type)===1)options.push(['toggle','Schalter umschalten']);
+            operation=selectControl(options,existing?.type==='homeegram'?'set':existing?.operation||'set');
+            field(details,'Aktion',operation);operation.onchange=()=>{refreshValue();touch();};
+          }else{
+            const values=[['equal','Ist gleich (=)'],['greater','Ist größer (>)'],['less','Ist kleiner (<)']];
+            if(kind==='triggers')values.push(['changed','Bei jeder Änderung']);else values.push(['notEqual','Ist ungleich (≠)'],['greaterOrEqual','Ist größer oder gleich (≥)'],['lessOrEqual','Ist kleiner oder gleich (≤)']);
+            comparison=selectControl(values,existing?.comparison||'equal');field(details,kind==='triggers'?'Auslösen, wenn':'Bedingung',comparison);
+            comparison.onchange=()=>{refreshValue();touch();};
+          }
+          const valueSlot=el('div');valueSlot.id='editor-value-slot';details.append(valueSlot);
+          function refreshValue(){
+            valueSlot.replaceChildren();
+            if((kind==='actions'&&operation.value==='toggle')||(kind==='triggers'&&comparison.value==='changed')){value=null;return;}
+            const labels=valueLabels(found,kind==='actions');
+            if(Object.keys(labels).length)value=selectControl(Object.entries(labels),existing?.value??Object.keys(labels)[0]);
+            else{value=inputControl('number',existing?.value??found?.current_value??0);value.step=found?.step>0?found.step:'any';if(found?.minimum!=null)value.min=String(found.minimum);if(found?.maximum!=null)value.max=String(found.maximum);}
+            value.required=true;value.oninput=touch;field(valueSlot,found?.unit?'Zielwert · '+found.unit:'Zielwert',value);
+          }
+          refreshValue();populatePath(details);trackControls(details);
+        }
+        device.onchange=()=>{populateAttributes(null);touch();};attribute.onchange=()=>{populateDetails();touch();};populateAttributes(existing?.attribute_id);
+      }
+      function populateType(){body.replaceChildren();if(elementType?.value==='homeegram')populateHomeegram();else populateDevice();}
+      if(elementType)elementType.onchange=()=>{populateType();touch();};populateType();
+      const error=el('div','field-help danger');error.setAttribute('role','alert');form.append(error);
+      const buttons=el('div','actions');
+      if(existing){const remove=el('button','danger','Entfernen');remove.type='button';remove.onclick=()=>{state.draft[kind].splice(index,1);markDirty();renderTree();closeInspector();};buttons.append(remove);}
+      const submit=el('button','primary',existing?'Übernehmen':'Hinzufügen');submit.type='button';buttons.append(submit);form.append(buttons);
+      const applyElement=event=>{
+        event.preventDefault();error.textContent='';let item;
+        if(elementType?.value==='homeegram'){
+          const id=Number(hgTarget.value);
+          if(!hgTarget.value||!Number.isSafeInteger(id)||id<=0||!availableHomeegrams().some(hg=>Number(hg.id)===id)){
+            error.textContent='Bitte ein auf dieser homee-Quelle vorhandenes Homeegramm auswählen.';return;
+          }
+          if(kind==='actions'?!Object.hasOwn(hgOperations,operation.value):!Object.hasOwn(hgTriggerEvents,hgEvent.value)){
+            error.textContent='Bitte ein gültiges Homeegramm-Ereignis auswählen.';return;
+          }
+          item=kind==='actions'?{type:'homeegram',target_homeegram_id:id,operation:operation.value}:{type:'homeegram',source_homeegram_id:id,event:hgEvent.value};
+        }else{
+          const nodeId=Number(device.value),attributeId=Number(attribute.value);
+          const found=findAttribute({node_id:nodeId,attribute_id:attributeId}).attribute;
+          if(!device.value||!attribute.value||!found||(kind==='actions'&&!found.editable)){error.textContent='Bitte ein Gerät und eine gültige Eigenschaft auswählen.';return;}
+          const number=value?Number(value.value):0;
+          if(value&&(!value.value.trim()||!Number.isFinite(number))){error.textContent='Bitte einen gültigen Zielwert eingeben.';return;}
+          if(value?.type==='number'&&!value.checkValidity()){error.textContent='Der Zielwert liegt außerhalb des gültigen Bereichs.';return;}
+          item={node_id:nodeId,attribute_id:attributeId,value:number};
+          if(kind==='actions')item.operation=operation.value;else item.comparison=comparison.value;
+        }
+        if(kind==='actions'){
+          item.branch=Number(path.value);item.delay=Number(delay.value);
+          if(!delay.value.trim()||!Number.isInteger(item.delay)||item.delay<0||item.delay>604800){error.textContent='Die Verzögerung muss zwischen 0 und 604800 Sekunden liegen.';return;}
+        }else if(kind==='conditions'){item.branch=Number(path.value);item.check_moment=Number(checkMoment.value);}
+        if(existing)state.draft[kind][index]=item;else state.draft[kind].push(item);
+        state.formDirty=false;markDirty();renderTree();closeInspector();
+        announce(kinds[kind]+' im Entwurf übernommen. Zum Teilen mit der KI bitte Entwurf speichern.');
+      };
+      submit.onclick=applyElement;form.onsubmit=applyElement;
+      form.addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.tagName==='INPUT')applyElement(event);});
+      panel.append(form);updateButtons();modelContext();if(window.innerWidth<=760)panel.scrollIntoView({behavior:'smooth',block:'start'});
+    }
+    async function load(args={},discard=true) {if(discard&&!await askDiscard()){if(state.data)fillLibraries();return;}clearBanner();setBusy(true);try{renderData(await callTool('get_homeegram_workspace',args));}catch(error){showBanner(error.message,'error');$('loading').classList.add('hidden');}finally{setBusy(false);}}
+    $('source').onchange=()=>load({integration_id:$('source').value});$('homeegrams').onchange=()=>{if($('homeegrams').value)load({integration_id:selectedSource(),homeegram_id:Number($('homeegrams').value)});};$('drafts').onchange=()=>{if($('drafts').value)load({integration_id:selectedSource(),draft_id:$('drafts').value});};$('new-draft').onclick=async()=>{if(!await askDiscard())return;clearBanner();setBusy(true);try{renderData(await callTool('create_homeegram_workspace',{integration_id:$('source').value,request_id:uuid(),name:'Neues Homeegramm'}));showBanner('Gemeinsamer Entwurf angelegt. Er ist nur in SHB gespeichert und steuert noch keine Geräte.','success');}catch(error){showBanner(error.message,'error');}finally{setBusy(false);}};
+    $('name').oninput=()=>{if(!state.draft)return;state.draft.name=$('name').value;markDirty();};$('manual-play').onchange=()=>{if(!state.draft)return;state.draft.manual_play=$('manual-play').checked;markDirty();renderTree();};$('save').onclick=async()=>{if(!editable()||state.formDirty||state.conflict)return;if(!state.draft.name.trim()){showBanner('Bitte einen Namen für den Entwurf eingeben.','error');return;}const snapshot=JSON.stringify(state.draft);if(state.saveAttempt?.snapshot!==snapshot)state.saveAttempt={snapshot,request_id:uuid()};setBusy(true);clearBanner();try{renderData(await callTool('update_homeegram_workspace',{draft_id:state.data.workspace.draft_id,expected_revision:state.baseRevision,request_id:state.saveAttempt.request_id,draft:clone(state.draft)}));showBanner('Entwurf gespeichert. Die KI kann jetzt mit diesem Stand weiterarbeiten.','success');}catch(error){showBanner(error.message,'error');}finally{setBusy(false);}};
+    $('reload-conflict').onclick=()=>load({draft_id:state.data?.workspace?.draft_id});$('deploy').onclick=()=>{if($('deploy').disabled)return;$('confirm-summary').textContent=(state.draft?.name||'Homeegramm')+' · '+(state.data?.workspace?.source_name||'homee')+' · '+state.draft.actions.length+' Aktion(en)';$('confirm-dialog').showModal();};$('cancel-deploy').onclick=()=>$('confirm-dialog').close();$('confirm-deploy').onclick=async()=>{if($('deploy').disabled)return;$('confirm-dialog').close();state.deployAttempt=state.deployAttempt||uuid();setBusy(true);clearBanner();try{const data=await callTool('deploy_homeegram_workspace',{draft_id:state.data.workspace.draft_id,expected_revision:state.baseRevision,request_id:state.deployAttempt});renderData(data);showBanner('Das Homeegramm wurde deaktiviert auf homee angelegt. Es wurde nicht abgespielt.','success');}catch(error){showBanner(error.message,'error');}finally{setBusy(false);}};
+    $('ask-ai').onclick=async()=>{if(anyDirty()){showBanner('Speichere zuerst den Entwurf, damit die KI denselben Stand sieht.');return;}modelContext();const workspace=state.data.workspace;const text=workspace.draft_id?'Bitte besprich mit mir den SHB-Homeegramm-Entwurf „'+workspace.name+'“ (draft_id '+workspace.draft_id+', Revision '+state.baseRevision+'). Frage nach den gewünschten Änderungen und bearbeite denselben Entwurf mit den Workspace-Tools. Nicht ohne meine ausdrückliche Bestätigung auf homee anlegen.':'Bitte erkläre mir den Ablauf von Homeegramm '+workspace.homeegram_id+' „'+workspace.name+'“ auf der homee-Quelle '+workspace.integration_id+'.';try{await rpc('ui/message',{role:'user',content:[{type:'text',text}]});}catch(error){showBanner(error.message,'error');}};
+    function receiveToolData(data) {state.resultReceived=true;if(!anyDirty()){renderData(data);return;}if(state.data?.workspace?.draft_id===data.workspace?.draft_id){renderData(data,{poll:true});return;}state.pendingIncoming=data;const banner=$('banner');banner.className='banner';const row=el('div','row');row.append(el('span','','Die KI hat eine andere Homeegramm-Ansicht geöffnet. Deine nicht gespeicherten Änderungen bleiben erhalten.'));const open=el('button','','Neue Ansicht öffnen');open.onclick=async()=>{if(await askDiscard()){const incoming=state.pendingIncoming;state.pendingIncoming=null;clearBanner();renderData(incoming);}};row.append(open);banner.replaceChildren(row);}
+    window.addEventListener('message',event=>{if(event.source!==window.parent||state.destroyed)return;if(state.hostOrigin&&event.origin!==state.hostOrigin)return;const message=event.data;if(!message||message.jsonrpc!=='2.0')return;if(message.id!=null&&state.pending.has(message.id)){const pending=state.pending.get(message.id);state.pending.delete(message.id);clearTimeout(pending.timer);if(pending.method==='ui/initialize'&&event.origin)state.hostOrigin=event.origin;if(message.error)pending.reject(new Error(message.error.message||'Die MCP-Anfrage wurde abgelehnt.'));else pending.resolve(message.result);return;}if(message.method==='ui/notifications/tool-input'){state.initialArgs=message.params?.arguments||message.params||{};}else if(message.method==='ui/notifications/tool-result'){try{receiveToolData(unwrap(message.params?.result||message.params));}catch(error){showBanner(error.message,'error');}}else if(message.method==='ui/notifications/host-context-changed')applyContext(message.params?.hostContext||message.params||{});else if(message.method==='ui/resource-teardown'){if(message.id!=null)post({id:message.id,result:{}});state.destroyed=true;clearInterval(state.poll);if(state.discardResolver)resolveDiscard(false);for(const pending of state.pending.values()){clearTimeout(pending.timer);pending.reject(new Error('Ansicht geschlossen.'));}state.pending.clear();}});
+    let resizeTimer;const observer=new ResizeObserver(()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(state.initialized)notify('ui/notifications/size-changed',{width:Math.ceil(document.documentElement.getBoundingClientRect().width),height:Math.ceil(document.documentElement.scrollHeight)});},80);});observer.observe(document.body);
+    async function initialize(){if(window.parent===window){$('loading').classList.add('hidden');$('empty').classList.remove('hidden');$('connection').textContent='In einer MCP-App öffnen';showBanner('Diese Ansicht benötigt einen MCP-Apps-fähigen Chat-Host. Öffne im verbundenen SHB-MCP die Homeegramm-Ansicht. Eine lokale HTML-Datei besitzt keine Server-Berechtigung.');return;}try{state.connected=true;const result=await rpc('ui/initialize',{protocolVersion:'2026-01-26',appInfo:{name:'SHB Homeegramme',version:'1.0.0'},appCapabilities:{availableDisplayModes:['inline','fullscreen']}},9000);state.initialized=true;state.hostCapabilities=result?.hostCapabilities||{};state.canCall=!!state.hostCapabilities.serverTools;applyContext(result?.hostContext||{});if(state.data)renderData(state.data);notify('ui/notifications/initialized');$('connection').textContent='Mit SHB verbunden';if(!state.canCall)showBanner('Dieser Host kann den Ablauf anzeigen, erlaubt der Ansicht aber keine MCP-Server-Aufrufe. Erstellen und Speichern sind hier nicht verfügbar.');setTimeout(()=>{if(!state.resultReceived&&state.canCall&&!state.destroyed)load(state.initialArgs,false);},1100);state.poll=setInterval(async()=>{if(state.busy||state.refreshBusy||state.destroyed||!state.canCall||!state.data?.workspace?.draft_id||document.visibilityState==='hidden')return;state.refreshBusy=true;try{const data=await callTool('get_homeegram_workspace',{draft_id:state.data.workspace.draft_id});if(data.workspace.revision!==state.baseRevision)renderData(data,{poll:true});}catch{}finally{state.refreshBusy=false;}},6000);updateButtons();}catch(error){state.connected=false;if(typeof window.openai?.callTool==='function'){state.useOpenAI=true;state.canCall=true;state.initialized=true;$('connection').textContent='Mit SHB verbunden';try{const initial=window.openai.toolOutput;if(initial)renderData(unwrap(initial));else await load({},false);}catch(fallbackError){showBanner(fallbackError.message,'error');}}else{$('loading').classList.add('hidden');$('connection').textContent='MCP-Ansicht nicht verbunden';showBanner('Die interaktive Ansicht konnte sich nicht mit dem Chat-Host verbinden. Benötigt wird MCP-Apps-Unterstützung; eine reine Text-MCP-Verbindung reicht nicht aus. '+error.message,'error');}updateButtons();}}
+    if(window.matchMedia?.('(prefers-color-scheme: dark)').matches)document.body.dataset.theme='dark';initialize();
+  })();
+  </script>
+</body>
+</html>
